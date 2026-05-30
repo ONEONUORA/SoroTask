@@ -53,4 +53,5 @@ jobs:
       - name: Export Logs on Failure
         if: failure()
         run: |
-          docker logs soroban-local
+          docker logs soroban-local || echo "Container soroban-local not found"
+          docker ps -a
