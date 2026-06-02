@@ -91,7 +91,7 @@ function normalizeSubmissionError(error, fallbackCode, correlationId) {
 
 async function executeTaskOnce(
   taskId,
-  { server, keypair, account, contractId, networkPassphrase, correlationId, logger: customLogger },
+  { server, keypair, account, contractId, networkPassphrase, correlationId, transactionFeeMultiplier, logger: customLogger },
 ) {
   const taskLogger = customLogger || logger;
   const contract = new Contract(contractId);
@@ -99,8 +99,10 @@ async function executeTaskOnce(
     xdr.Uint64.fromString(taskId.toString()),
   );
 
+  const multiplier = Number(transactionFeeMultiplier) > 0 ? Number(transactionFeeMultiplier) : 1;
+  const fee = Math.max(BASE_FEE, Math.round(BASE_FEE * multiplier));
   const tx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
+    fee,
     networkPassphrase: networkPassphrase || Networks.FUTURENET,
   })
     .addOperation(contract.call("execute", taskIdScVal))
@@ -214,11 +216,16 @@ async function executeTask(
       contractId,
       networkPassphrase,
       correlationId,
+      transactionFeeMultiplier: deps.dynamicFeeMultiplier,
       logger: taskLogger,
     });
     result.txHash = executionResult.txHash;
     result.status = executionResult.status;
     result.feePaid = executionResult.feePaid;
+
+    if (deps.gasMonitor && typeof deps.gasMonitor.recordExecution === 'function') {
+      deps.gasMonitor.recordExecution(taskId, result.feePaid);
+    }
 
     taskLogger.info("Transaction finalised", {
       taskId,
