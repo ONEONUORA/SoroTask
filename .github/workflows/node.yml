@@ -42,7 +42,7 @@ jobs:
     - name: Install packages
       if: steps.project-changes.outputs.should-run == 'true'
       working-directory: ./${{ matrix.project }}
-      run: npm install
+      run: npm install --legacy-peer-deps
       
     - name: Lint
       if: steps.project-changes.outputs.should-run == 'true'
