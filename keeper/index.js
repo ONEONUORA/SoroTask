@@ -24,8 +24,7 @@ const { GracefulShutdownManager } = require("./src/gracefulShutdown");
 const { createDefaultFilterChain } = require("./src/taskFilter");
 const { WebhookAuthProtocol, InMemoryReplayStore } = require("./src/webhookAuth");
 const { WebhookTriggerHandler } = require("./src/webhookTrigger");
-const { KeeperP2PNetwork } = require("./src/p2pNetwork");
-const { ResolverRuntime } = require("./src/resolverRuntime");
+const { SLAMonitor } = require("./src/slaMonitor");
 
 // Create root logger for the main module
 const logger = createLogger("keeper");
@@ -139,19 +138,13 @@ async function main() {
 
   metricsServer.start();
 
-  const dbShardManager = new PostgresShardManager({
-    baseCount: config.dbShardBaseCount,
-    maxCount: config.dbShardMaxCount,
-    scaleUpThreshold: config.dbShardScaleUpThreshold,
-    scaleDownThreshold: config.dbShardScaleDownThreshold,
-    userCapacityPerShard: config.dbShardUserCapacity,
-    taskCapacityPerShard: config.dbShardTaskCapacity,
-    enableAutoScaling: config.dbShardAutoScaling,
-  }, createLogger("db-shard"));
-  metricsServer.updateDbShardState(dbShardManager.refresh({
-    activeUsers: 0,
-    pendingTasks: 0,
-  }));
+  const slaMonitor = new SLAMonitor(server, config.contractId, config, {
+    historyManager,
+    metricsServer,
+    operatorKeypair: keypair,
+    logger: createLogger('sla-monitor'),
+  });
+  await slaMonitor.start();
 
   // Perform startup validation to fail fast on configuration errors
   const validator = new StartupValidator(
@@ -227,19 +220,32 @@ async function main() {
       attemptId: context?.attemptId || null,
     }),
   );
-  queue.on("task:started", (taskId, context) => {
-    metricsServer.publishTaskEvent("queue-started", taskId, {
-      attemptId: context?.attemptId || null,
-      pollCorrelationId: context?.pollCorrelationId || null,
-    });
-  });
-  queue.on("task:success", (taskId) => {
-    queueLogger.info("Task executed successfully", { taskId });
+  queue.on("task:success", (taskId, context, result) => {
+    queueLogger.info("Task executed successfully", { taskId, txHash: result?.txHash || null });
+    if (historyManager) {
+      historyManager.record({
+        kind: 'execution',
+        taskId,
+        keeper: keypair.publicKey(),
+        status: 'SUCCESS',
+        txHash: result?.txHash || null,
+        feePaid: result?.feePaid || null,
+      });
+    }
     shutdownManager.completeTask(taskId);
     metricsServer.publishTaskEvent("queue-success", taskId);
   });
-  queue.on("task:failed", (taskId, err) => {
+  queue.on("task:failed", (taskId, err, context) => {
     queueLogger.error("Task failed", { taskId, error: err.message });
+    if (historyManager) {
+      historyManager.record({
+        kind: 'execution',
+        taskId,
+        keeper: keypair.publicKey(),
+        status: 'FAILED',
+        error: err.message,
+      });
+    }
     shutdownManager.failTask(taskId, err);
     poller.invalidateCache(taskId);
     metricsServer.publishTaskEvent("queue-failed", taskId, { error: err.message });
@@ -483,6 +489,12 @@ async function main() {
         ...status,
       });
     }
+  });
+
+  // Register SLA monitor cleanup
+  shutdownManager.registerResource("sla-monitor", async () => {
+    logger.info("Stopping SLA monitor");
+    await slaMonitor.stop();
   });
 
   // Register registry cleanup

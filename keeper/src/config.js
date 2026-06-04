@@ -88,6 +88,13 @@ function loadConfig() {
     totalShards: parseInteger(process.env.KEEPER_SHARD_COUNT, 1),
     driftWarningSeconds: parseInteger(process.env.DRIFT_WARNING_SECONDS, 60),
     driftCriticalSeconds: parseInteger(process.env.DRIFT_CRITICAL_SECONDS, 300),
+    slaMonitorEnabled: parseBoolean(process.env.SLA_MONITOR_ENABLED, false),
+    slaCheckIntervalMs: parseInteger(process.env.SLA_CHECK_INTERVAL_MS, 60000),
+    slaMinEvaluationWindow: parseInteger(process.env.SLA_MIN_EVALUATION_WINDOW, 10),
+    slaFailureThreshold: parseFloat(process.env.SLA_FAILURE_THRESHOLD) || 0.5,
+    slaSlashAmount: parseInteger(process.env.SLA_SLASH_AMOUNT, 100),
+    slaOperatorSecret: process.env.SLA_OPERATOR_SECRET || process.env.KEEPER_SECRET,
+    slaMaxRecentHistory: parseInteger(process.env.SLA_MAX_RECENT_HISTORY, 200),
     metricsResetOnStart: parseBoolean(process.env.METRICS_RESET_ON_START, false),
     p2p: {
       enabled: p2pEnabled,

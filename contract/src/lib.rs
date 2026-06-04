@@ -32,27 +32,17 @@ pub enum Error {
     TaskAlreadyActive = 7,
     SelfDependency = 8,
     DependencyNotFound = 9,
-    TaskNotFound = 10,
-    CircularDependency = 11,
-    DependencyBlocked = 12,
-    AlreadyInitialized = 13,
+    CircularDependency = 10,
+    DependencyBlocked = 11,
+    AlreadyInitialized = 12,
+    UnauthorizedSlasher = 13,
+    KeeperStakeTooLow = 14,
+    OperatorAlreadySet = 15,
     // Payload validation errors
-    ArgsTooMany = 14,
-    ArgsTooLarge = 15,
-    InvalidPayload = 16,
-    ReentrantCall = 17,
-    DependencyLimitExceeded = 18,
-    DependencyDepthExceeded = 19,
-    // VRF-related errors
-    VrfOracleNotSet = 20,
-    InvalidVrfRequest = 21,
-    VrfRequestFailed = 22,
-    VrfAlreadyFulfilled = 23,
-    // Yield strategy-related errors
-    YieldStrategyNotInitialized = 24,
-    InvalidYieldStrategy = 25,
-    YieldHarvestFailed = 26,
-    InsufficientYield = 27,
+    ArgsTooMany = 16,
+    ArgsTooLarge = 17,
+    InvalidPayload = 18,
+}
 
 /// Maximum number of arguments allowed in a task payload
 const MAX_ARGS_COUNT: u32 = 32;
@@ -356,6 +346,8 @@ pub enum DataKey {
     Counter,
     ActiveTasks,
     Token,
+    Operator,
+    KeeperStake(Address),
     TaskDependencies(u64),
     TaskStatus(u64),
     DependencyRules(u64),
@@ -431,210 +423,28 @@ fn remove_active_task_id(env: &Env, task_id: u64) {
     set_active_task_ids(env, &filtered);
 }
 
-fn get_state_channel(env: &Env, channel_id: u64) -> Option<StateChannel> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::StateChannel(channel_id))
+fn get_operator(env: &Env) -> Option<Address> {
+    env.storage().persistent().get(&DataKey::Operator)
 }
 
-fn set_state_channel(env: &Env, channel_id: u64, channel: &StateChannel) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::StateChannel(channel_id), channel);
-}
-
-fn get_state_channel_counter(env: &Env) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::StateChannelCounter)
-        .unwrap_or(0)
-}
-
-fn set_state_channel_counter(env: &Env, counter: u64) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::StateChannelCounter, &counter);
-}
-
-fn get_state_channel_update(env: &Env, update_id: u64) -> Option<StateChannelUpdate> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::StateChannelUpdates(update_id))
-}
-
-fn set_state_channel_update(env: &Env, update_id: u64, update: &StateChannelUpdate) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::StateChannelUpdates(update_id), update);
-}
-
-fn get_state_channel_settlement(env: &Env, settlement_id: u64) -> Option<StateChannelSettlement> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::StateChannelSettlements(settlement_id))
-}
-
-fn set_state_channel_settlement(
-    env: &Env,
-    settlement_id: u64,
-    settlement: &StateChannelSettlement,
-) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::StateChannelSettlements(settlement_id), settlement);
-}
-
-fn enter_security_guard(env: &Env) {
-    if env
-        .storage()
-        .instance()
-        .get(&DataKey::ReentrancyLock)
-        .unwrap_or(false)
-    {
-        panic_with_error!(env, Error::ReentrantCall);
+fn require_operator(env: &Env, signer: Address) {
+    let operator = get_operator(env).expect("Operator not configured");
+    if operator != signer {
+        panic_with_error!(&env, Error::UnauthorizedSlasher);
     }
-
-    env.storage()
-        .instance()
-        .set(&DataKey::ReentrancyLock, &true);
 }
 
-fn exit_security_guard(env: &Env) {
-    env.storage().instance().remove(&DataKey::ReentrancyLock);
-}
-
-fn get_keeper_reputation(env: &Env, address: &Address) -> Option<KeeperReputation> {
+fn get_keeper_stake(env: &Env, keeper: &Address) -> i128 {
     env.storage()
         .persistent()
-        .get(&DataKey::KeeperReputation(address.clone()))
-}
-
-fn set_keeper_reputation(env: &Env, address: &Address, reputation: &KeeperReputation) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::KeeperReputation(address.clone()), reputation);
-}
-
-fn get_keeper_reputation_counter(env: &Env) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::KeeperReputationCounter)
+        .get(&DataKey::KeeperStake(keeper.clone()))
         .unwrap_or(0)
 }
 
-fn set_keeper_reputation_counter(env: &Env, counter: u64) {
+fn set_keeper_stake(env: &Env, keeper: &Address, amount: i128) {
     env.storage()
         .persistent()
-        .set(&DataKey::KeeperReputationCounter, &counter);
-}
-
-fn get_keeper_reputation_history(env: &Env, address: &Address) -> Option<KeeperReputationHistory> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::KeeperReputationHistory(address.clone()))
-}
-
-fn set_keeper_reputation_history(env: &Env, address: &Address, history: &KeeperReputationHistory) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::KeeperReputationHistory(address.clone()), history);
-}
-
-fn get_role_assignment(env: &Env, address: &Address) -> Option<RoleAssignment> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::RoleAssignments(address.clone()))
-}
-
-fn set_role_assignment(env: &Env, address: &Address, assignment: &RoleAssignment) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::RoleAssignments(address.clone()), assignment);
-}
-
-fn get_role_assignment_counter(env: &Env) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::RoleAssignmentCounter)
-        .unwrap_or(0)
-}
-
-fn set_role_assignment_counter(env: &Env, counter: u64) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::RoleAssignmentCounter, &counter);
-}
-
-fn get_permission_grant(env: &Env, address: &Address) -> Option<PermissionGrant> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::PermissionGrants(address.clone()))
-}
-
-fn set_permission_grant(env: &Env, address: &Address, grant: &PermissionGrant) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::PermissionGrants(address.clone()), grant);
-}
-
-fn get_permission_grant_counter(env: &Env) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::PermissionGrantCounter)
-        .unwrap_or(0)
-}
-
-fn set_permission_grant_counter(env: &Env, counter: u64) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::PermissionGrantCounter, &counter);
-}
-
-fn get_delegation(env: &Env, address: &Address) -> Option<Delegation> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::Delegations(address.clone()))
-}
-
-fn set_delegation(env: &Env, address: &Address, delegation: &Delegation) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Delegations(address.clone()), delegation);
-}
-
-fn get_delegation_counter(env: &Env) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::DelegationCounter)
-        .unwrap_or(0)
-}
-
-fn set_delegation_counter(env: &Env, counter: u64) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::DelegationCounter, &counter);
-}
-
-fn read_proxy_config(env: &Env) -> Option<ProxyConfig> {
-    env.storage().instance().get(&DataKey::ProxyConfig)
-}
-
-fn set_proxy_config(env: &Env, config: &ProxyConfig) {
-    env.storage().instance().set(&DataKey::ProxyConfig, config);
-}
-
-fn require_proxy_admin(env: &Env, caller: &Address) -> ProxyConfig {
-    caller.require_auth();
-
-    let config = read_proxy_config(env).unwrap_or_else(|| {
-        panic_with_error!(env, Error::UpgradeNotInitialized);
-    });
-
-    if config.admin != *caller {
-        panic_with_error!(env, Error::Unauthorized);
-    }
-
-    config
+        .set(&DataKey::KeeperStake(keeper.clone()), &amount);
 }
 
 #[contracttype]

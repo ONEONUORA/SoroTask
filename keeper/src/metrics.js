@@ -81,12 +81,17 @@ class Metrics {
       webhookAcceptedTotal: 0,
       webhookRejectedTotal: 0,
       webhookReplayRejectedTotal: 0,
+      slaChecksTotal: 0,
+      slaViolationsTotal: 0,
+      slaSlashedTotal: 0,
     };
     this.gauges = {
       avgFeePaidXlm: 0,
       lastCycleDurationMs: 0,
       lastRetryCycleDurationMs: 0,
       rpcCircuitState: 0,
+      slaLastCheckDurationMs: 0,
+      slaLastSlashAmount: 0,
     };
     this.feeSamples = [];
   }
@@ -436,6 +441,31 @@ class MetricsServer {
       help: 'Number of tasks with low gas balance',
       registers: [this.register],
     });
+    this.promSlaChecks = new promClient.Counter({
+      name: 'keeper_sla_checks_total',
+      help: 'Total number of SLA evaluation cycles completed',
+      registers: [this.register],
+    });
+    this.promSlaViolations = new promClient.Counter({
+      name: 'keeper_sla_violations_total',
+      help: 'Total number of SLA violations detected',
+      registers: [this.register],
+    });
+    this.promSlaSlashed = new promClient.Counter({
+      name: 'keeper_sla_slashed_total',
+      help: 'Total number of keeper slashing actions submitted',
+      registers: [this.register],
+    });
+    this.promSlaLastCheckDuration = new promClient.Gauge({
+      name: 'keeper_sla_last_check_duration_ms',
+      help: 'Duration of the last SLA evaluation run in milliseconds',
+      registers: [this.register],
+    });
+    this.promSlaLastSlashAmount = new promClient.Gauge({
+      name: 'keeper_sla_last_slash_amount',
+      help: 'Amount slashed in the most recent SLA enforcement event',
+      registers: [this.register],
+    });
     this.promUptime = new promClient.Gauge({
       name: 'keeper_uptime_seconds',
       help: 'Keeper service uptime in seconds',
@@ -585,6 +615,11 @@ class MetricsServer {
     this.promCycleDuration.set(this.metrics.gauges.lastCycleDurationMs);
     this.promRetryCycleDuration.set(this.metrics.gauges.lastRetryCycleDurationMs);
     this.promLowGasCount.set(this.gasMonitor.getLowGasCount());
+    this.promSlaChecks.inc(0);
+    this.promSlaViolations.inc(0);
+    this.promSlaSlashed.inc(0);
+    this.promSlaLastCheckDuration.set(this.metrics.gauges.slaLastCheckDurationMs);
+    this.promSlaLastSlashAmount.set(this.metrics.gauges.slaLastSlashAmount);
     this.promUptime.set(Math.floor((Date.now() - this.metrics.startTime) / 1000));
     this.promRpcConnected.set(this.metrics.rpcConnected ? 1 : 0);
     this.promRpcCircuitState.set(this.metrics.gauges.rpcCircuitState);
@@ -1012,6 +1047,12 @@ class MetricsServer {
       );
     } else if (key === 'adminStateChangesTotal') {
       this.promAdminStateChanges.inc(typeof amount === 'number' ? amount : 1);
+    } else if (key === 'slaChecksTotal') {
+      this.promSlaChecks.inc(typeof amount === 'number' ? amount : 1);
+    } else if (key === 'slaViolationsTotal') {
+      this.promSlaViolations.inc(typeof amount === 'number' ? amount : 1);
+    } else if (key === 'slaSlashedTotal') {
+      this.promSlaSlashed.inc(typeof amount === 'number' ? amount : 1);
     }
   }
 
@@ -1026,6 +1067,10 @@ class MetricsServer {
       this.promRetryCycleDuration.set(value);
     } else if (key === 'rpcCircuitState') {
       this.promRpcCircuitState.set(value);
+    } else if (key === 'slaLastCheckDurationMs') {
+      this.promSlaLastCheckDuration.set(value);
+    } else if (key === 'slaLastSlashAmount') {
+      this.promSlaLastSlashAmount.set(value);
     }
   }
 
