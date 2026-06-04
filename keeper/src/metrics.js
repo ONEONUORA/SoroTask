@@ -8,11 +8,38 @@ const { ApiGateway } = require('./apiGateway');
 const { FailurePredictor, KeeperReputationScorer } = require('./insights');
 const SloMetrics = require('./sloMetrics');
 
+class MetricsHistory {
+  constructor(maxSamples = 120) {
+    this.maxSamples = maxSamples;
+    this.samples = [];
+  }
+
+  record(point) {
+    this.samples.push({
+      timestamp: new Date().toISOString(),
+      ...point,
+    });
+    if (this.samples.length > this.maxSamples) {
+      this.samples.shift();
+    }
+  }
+
+  getSamples(limit) {
+    const max = typeof limit === 'number' ? limit : this.samples.length;
+    return this.samples.slice(-max);
+  }
+}
+
 class Metrics {
   constructor() {
     this.startTime = Date.now();
+    this.history = new MetricsHistory(
+      parseInt(process.env.METRICS_HISTORY_MAX_SAMPLES || '120', 10),
+    );
     this.maxFeeSamples = 100;
     this.lastPollAt = null;
+    this.lastBacklogSize = null;
+    this.retryPressure = 0;
     this.rpcConnected = false;
     this.adminState = { paused: false, reason: null, changedAt: null };
     this.shardState = {
@@ -21,6 +48,13 @@ class Metrics {
       shardLabel: 'shard-0',
       ownedTasks: 0,
       skippedTasks: 0,
+    };
+    this.dbShardState = {
+      dbShardCount: 1,
+      dbShardLabel: 'postgres-shard-0',
+      dbShardStrategy: 'fixed',
+      activeUsers: 0,
+      pendingTasks: 0,
     };
     this.driftState = {
       warning: 0,
@@ -41,20 +75,80 @@ class Metrics {
       tasksFailedTotal: 0,
       tasksSkippedIdempotencyTotal: 0,
       throttledRequestsTotal: 0,
+      tasksSkippedIdempotencyTotal: 0,
+
+      // SLO counters
+      pollFreshnessSloSuccess: 0,
+      pollFreshnessSloFailure: 0,
+      executionTimelinessSloSuccess: 0,
+      executionTimelinessSloFailure: 0,
+      retriesExhausted: 0,
+      retryAttemptsTotal: { success: 0, failure: 0, duplicate: 0 },
+
+      // Retry-related counters
+      retriesExecutedTotal: 0,
+      retriesFailedTotal: 0,
       retriesExecutedTotal: 0,
       retriesFailedTotal: 0,
       adminStateChangesTotal: 0,
       webhookAcceptedTotal: 0,
       webhookRejectedTotal: 0,
       webhookReplayRejectedTotal: 0,
+      slaChecksTotal: 0,
+      slaViolationsTotal: 0,
+      slaSlashedTotal: 0,
     };
     this.gauges = {
       avgFeePaidXlm: 0,
       lastCycleDurationMs: 0,
+      rpcCircuitState: 0, // 0 = CLOSED, 1 = HALF_OPEN, 2 = OPEN
+
+      // SLO gauges
+      pollFreshnessSeconds: 0,
+      oldestTaskAgeSeconds: 0,
+      retryQueueSize: 0,
+      pollFreshnessSloRate: 0,
+      executionTimelinessSloRate: 0,
       lastRetryCycleDurationMs: 0,
       rpcCircuitState: 0,
+      slaLastCheckDurationMs: 0,
+      slaLastSlashAmount: 0,
     };
     this.feeSamples = [];
+    this.maxFeeSamples = 100;
+
+    this.startTime = Date.now();
+    this.lastPollAt = null;
+    this.lastPollCompletedAt = null;
+    this.rpcConnected = false;
+
+    // SLO thresholds (configurable, defaults set in constructor)
+    this.sloThresholds = {
+      pollFreshnessMs: 60000, // Poll should complete within 60s
+      executionTimelinessMs: 0, // Will be set from config
+    };
+
+    // Domain configuration sources
+    this.pollIntervalMs = 30000; // Default, overridden via setPollInterval
+  }
+
+  increment(key, amount = 1) {
+    if (key === 'pollFreshnessSloSuccess') {
+      this.counters.pollFreshnessSloSuccess += amount;
+    } else if (key === 'pollFreshnessSloFailure') {
+      this.counters.pollFreshnessSloFailure += amount;
+    } else if (key === 'executionTimelinessSloSuccess') {
+      this.counters.executionTimelinessSloSuccess += amount;
+    } else if (key === 'executionTimelinessSloFailure') {
+      this.counters.executionTimelinessSloFailure += amount;
+    } else if (key === 'retriesExhausted') {
+      this.counters.retriesExhausted += amount;
+    } else if (key === 'retryAttemptsTotal' && typeof amount === 'object') {
+      const outcome = amount.outcome || 'unknown';
+      if (this.counters.retryAttemptsTotal[outcome] !== undefined) {
+        this.counters.retryAttemptsTotal[outcome] += 1;
+      }
+    } else if (key in this.counters) {
   }
 
   increment(key, amount = 1) {
@@ -75,6 +169,21 @@ class Metrics {
         this.feeSamples.shift();
       }
       this.gauges.avgFeePaidXlm =
+        this.feeSamples.reduce((sum, v) => sum + v, 0) /
+        this.feeSamples.length;
+    } else if (key === 'rpcCircuitState') {
+      this.gauges.rpcCircuitState = value;
+    } else if (key === 'pollFreshnessSeconds') {
+      this.gauges.pollFreshnessSeconds = value;
+    } else if (key === 'oldestTaskAgeSeconds') {
+      this.gauges.oldestTaskAgeSeconds = value;
+    } else if (key === 'retryQueueSize') {
+      this.gauges.retryQueueSize = value;
+    } else if (key === 'pollFreshnessSloRate') {
+      this.gauges.pollFreshnessSloRate = value;
+    } else if (key === 'executionTimelinessSloRate') {
+      this.gauges.executionTimelinessSloRate = value;
+    } else if (key in this.gauges) {
         this.feeSamples.reduce((sum, sample) => sum + sample, 0) / this.feeSamples.length;
       return;
     }
@@ -83,14 +192,40 @@ class Metrics {
     }
   }
 
+  setPollIntervalMs(ms) {
+    this.pollIntervalMs = ms;
+  }
+
+  setSloThreshold(key, valueMs) {
+    if (key === 'pollFreshness') {
+      this.sloThresholds.pollFreshnessMs = valueMs;
+    } else if (key === 'executionTimeliness') {
+      this.sloThresholds.executionTimelinessMs = valueMs;
+    }
+  }
+
+  getSloThreshold(key) {
+    return this.sloThresholds[key] || null;
+  }
+
+  updateHealth(state) {
   updateHealth(state = {}) {
     if (state.lastPollAt) {
       this.lastPollAt = state.lastPollAt instanceof Date
         ? state.lastPollAt
         : new Date(state.lastPollAt);
     }
+    if (state.lastPollCompletedAt) {
+      this.lastPollCompletedAt = state.lastPollCompletedAt;
+    }
     if (typeof state.rpcConnected === 'boolean') {
       this.rpcConnected = state.rpcConnected;
+    }
+    if (typeof state.backlogSize === 'number') {
+      this.lastBacklogSize = state.backlogSize;
+    }
+    if (typeof state.retryBudgetPressure === 'number') {
+      this.retryPressure = state.retryBudgetPressure;
     }
   }
 
@@ -106,6 +241,10 @@ class Metrics {
     this.shardState = { ...this.shardState, ...state };
   }
 
+  updateDbShardState(state = {}) {
+    this.dbShardState = { ...this.dbShardState, ...state };
+  }
+
   updateDriftState(state = {}) {
     this.driftState = { ...this.driftState, ...state };
   }
@@ -114,32 +253,151 @@ class Metrics {
     return {
       ...this.counters,
       ...this.gauges,
+      sloThresholds: { ...this.sloThresholds },
       admin: { ...this.adminState },
       shard: { ...this.shardState },
+      dbShard: { ...this.dbShardState },
       drift: { ...this.driftState },
     };
+  }
+
+  recordHistoryPoint() {
+    const executed = this.counters.tasksExecutedTotal;
+    const failed = this.counters.tasksFailedTotal;
+    const attempts = executed + failed;
+    this.history.record({
+      tasksCheckedTotal: this.counters.tasksCheckedTotal,
+      tasksDueTotal: this.counters.tasksDueTotal,
+      tasksExecutedTotal: executed,
+      tasksFailedTotal: failed,
+      successRate: attempts > 0 ? executed / attempts : 1,
+      avgFeePaidXlm: this.gauges.avgFeePaidXlm,
+      lastCycleDurationMs: this.gauges.lastCycleDurationMs,
+    });
   }
 
   getHealthStatus(staleThreshold) {
     const now = Date.now();
     const uptimeSeconds = Math.floor((now - this.startTime) / 1000);
-    const isStale = this.lastPollAt && now - this.lastPollAt.getTime() > staleThreshold;
+    const lastPollAgeMs = this.lastPollAt ? now - this.lastPollAt.getTime() : null;
+    const isStale = lastPollAgeMs == null || lastPollAgeMs > staleThreshold;
+    const rpcCircuitState = this.gauges.rpcCircuitState === 2
+      ? 'OPEN'
+      : (this.gauges.rpcCircuitState === 1 ? 'HALF_OPEN' : 'CLOSED');
+    const backlogSize = typeof this.lastBacklogSize === 'number' ? this.lastBacklogSize : 0;
+    const retryBudgetPressure = this.retryPressure || 0;
+
+    const healthIssues = [];
+    if (!this.rpcConnected) {
+      healthIssues.push('RPC connectivity lost');
+    }
+    if (rpcCircuitState === 'HALF_OPEN') {
+      healthIssues.push('RPC circuit half-open');
+    }
+    if (rpcCircuitState === 'OPEN') {
+      healthIssues.push('RPC circuit open');
+    }
+    if (backlogSize > 200) {
+      healthIssues.push(`Polling backlog pressure: ${backlogSize} known task IDs`);
+    }
+    if (retryBudgetPressure >= 0.8) {
+      healthIssues.push(`Retry budget pressure at ${(retryBudgetPressure * 100).toFixed(0)}%`);
+    }
+    if (lastPollAgeMs != null && lastPollAgeMs > staleThreshold) {
+      healthIssues.push('Polling has not updated within threshold');
+    }
+    if (lastPollAgeMs == null) {
+      healthIssues.push('No successful poll has completed yet');
+    }
+
+    let status = 'healthy';
+    let statusDescription = 'Keeper is operating normally.';
+
+    if (!this.lastPollAt || rpcCircuitState === 'OPEN') {
+      status = 'unhealthy';
+      statusDescription = 'Keeper is unavailable due to stale polling or broken RPC circuits.';
+    } else if (isStale) {
+      status = 'stale';
+      statusDescription = 'Keeper polling is stale and may delay task execution. Check RPC and scheduler health.';
+    } else if (backlogSize > 500 || retryBudgetPressure >= 0.95) {
+      status = 'unhealthy';
+      statusDescription = 'Keeper is overloaded by backlog or retry pressure and may fail to keep up with task execution.';
+    } else if (!this.rpcConnected || rpcCircuitState === 'HALF_OPEN' || backlogSize > 200 || retryBudgetPressure >= 0.8) {
+      status = 'degraded';
+      statusDescription = 'Partial degradation detected. Some RPC, backlog, or retry behavior is impaired but the service is still responding.';
+    }
+
+    // Compute freshness: time since last completed poll
+    let freshnessSeconds = 0;
+    if (this.lastPollCompletedAt) {
+      freshnessSeconds = Math.floor((now - this.lastPollCompletedAt.getTime()) / 1000);
+    }
 
     return {
-      status: isStale ? 'stale' : 'ok',
+      status,
+      statusDescription,
+      statusSeverity: status === 'healthy' ? 'info' : status === 'degraded' ? 'warning' : 'critical',
       uptime: uptimeSeconds,
       lastPollAt: this.lastPollAt ? this.lastPollAt.toISOString() : null,
+      lastPollCompletedAt: this.lastPollCompletedAt ? this.lastPollCompletedAt.toISOString() : null,
+      pollFreshnessSeconds: freshnessSeconds,
       rpcConnected: this.rpcConnected,
+      rpcCircuitState: this.gauges.rpcCircuitState === 2 ? 'OPEN' : (this.gauges.rpcCircuitState === 1 ? 'HALF_OPEN' : 'CLOSED'),
+      slo: {
+        pollFreshnessRate: this.gauges.pollFreshnessSloRate,
+        executionTimelinessRate: this.gauges.executionTimelinessSloRate,
+        thresholds: { ...this.sloThresholds },
+      },
       rpcCircuitState: this.gauges.rpcCircuitState === 2
         ? 'OPEN'
         : (this.gauges.rpcCircuitState === 1 ? 'HALF_OPEN' : 'CLOSED'),
       paused: this.adminState.paused,
       pauseReason: this.adminState.reason,
       shard: { ...this.shardState },
+      healthIssues,
     };
   }
 }
 
+  reset() {
+    this.counters = {
+      tasksCheckedTotal: 0,
+      tasksDueTotal: 0,
+      tasksExecutedTotal: 0,
+      tasksFailedTotal: 0,
+      throttledRequestsTotal: 0,
+      tasksSkippedIdempotencyTotal: 0,
+      pollFreshnessSloSuccess: 0,
+      pollFreshnessSloFailure: 0,
+      executionTimelinessSloSuccess: 0,
+      executionTimelinessSloFailure: 0,
+      retriesExhausted: 0,
+      retriesExecutedTotal: 0,
+      retriesFailedTotal: 0,
+      retryAttemptsTotal: { success: 0, failure: 0, duplicate: 0 },
+    };
+    this.gauges = {
+      avgFeePaidXlm: 0,
+      lastCycleDurationMs: 0,
+      rpcCircuitState: 0,
+      pollFreshnessSeconds: 0,
+      oldestTaskAgeSeconds: 0,
+      retryQueueSize: 0,
+      pollFreshnessSloRate: 0,
+      executionTimelinessSloRate: 0,
+    };
+    this.feeSamples = [];
+    tasksExecutedTotal: 0,
+      tasksFailedTotal: 0,
+        throttledRequestsTotal: 0,
+    };
+    this.gauges = {
+  avgFeePaidXlm: 0,
+  lastCycleDurationMs: 0,
+  rpcCircuitState: 0,
+};
+this.feeSamples = [];
+  }
 function createDefaultGasMonitor() {
   return {
     getLowGasCount: () => 0,
@@ -150,11 +408,19 @@ function createDefaultGasMonitor() {
       forecastingEnabled: false,
       forecastSafetyBuffer: 0,
       forecastAggregationWindow: 0,
+      dynamicFeeMultiplier: 1,
     }),
     getForecasterState: () => ({
       trackedTasks: 0,
       totalHistoricalSamples: 0,
+      priceState: {
+        shortTermAverage: 0,
+        longTermAverage: 0,
+        trend: 0,
+        multiplier: 1,
+      },
     }),
+    getDynamicFeeMultiplier: () => 1,
   };
 }
 
@@ -214,12 +480,271 @@ class MetricsServer {
     this.registry = registry;
   }
 
+   initPrometheusMetrics() {
+     // Counter: Total tasks checked
+     this.promTasksChecked = new promClient.Counter({
+       name: 'keeper_tasks_checked_total',
+       help: 'Total number of tasks checked for execution eligibility',
+       registers: [this.register],
+     });
+
+     // Counter: Total tasks due for execution
+     this.promTasksDue = new promClient.Counter({
+       name: 'keeper_tasks_due_total',
+       help: 'Total number of tasks that were due for execution',
+       registers: [this.register],
+     });
+
+     // Counter: Total tasks executed successfully
+     this.promTasksExecuted = new promClient.Counter({
+       name: 'keeper_tasks_executed_total',
+       help: 'Total number of tasks executed successfully',
+       registers: [this.register],
+     });
+
+      // Counter: Total tasks failed
+      this.promTasksFailed = new promClient.Counter({
+        name: 'keeper_tasks_failed_total',
+        help: 'Total number of tasks that failed during execution',
+        registers: [this.register],
+      });
+
+      // Counter: Total tasks skipped due to idempotency lock
+      this.promTasksSkippedIdempotency = new promClient.Counter({
+        name: 'keeper_tasks_skipped_idempotency_total',
+        help: 'Total number of tasks skipped due to idempotency lock',
+        registers: [this.register],
+      });
+
+      // Counter: Total retry executions (retried tasks that succeeded)
+      this.promRetriesExecuted = new promClient.Counter({
+        name: 'keeper_retries_executed_total',
+        help: 'Total number of retried tasks that succeeded',
+        registers: [this.register],
+      });
+
+      // Counter: Total retries that failed
+      this.promRetriesFailed = new promClient.Counter({
+        name: 'keeper_retries_failed_total',
+        help: 'Total number of retried tasks that failed',
+        registers: [this.register],
+      });
+
+      // Histogram: Task execution lateness (ledger count between scheduled due and actual execution)
+      this.promTaskLateness = new promClient.Histogram({
+        name: 'keeper_task_execution_lateness_ledgers',
+        help: 'Difference in ledger numbers between task scheduled due time and actual execution',
+        buckets: [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000],
+        registers: [this.register],
+      });
+
+     // Gauge: Seconds since last successful poll cycle
+     this.promPollFreshnessSeconds = new promClient.Gauge({
+       name: 'keeper_poll_freshness_seconds',
+       help: 'Seconds since the last successful polling cycle completed',
+       registers: [this.register],
+     });
+
+     // Histogram: Interval between poll cycle completions
+     this.promPollInterval = new promClient.Histogram({
+       name: 'keeper_poll_interval_seconds',
+       help: 'Seconds between consecutive polling cycle completions',
+       buckets: [1, 5, 10, 30, 60, 120, 300, 600],
+       registers: [this.register],
+     });
+
+     // Gauge: Current age of oldest task in the registry (seconds since last_run)
+     this.promOldestTaskAgeSeconds = new promClient.Gauge({
+       name: 'keeper_oldest_task_age_seconds',
+       help: 'Age of the oldest registered task (seconds since last_run)',
+       registers: [this.register],
+     });
+
+     // Counter: Total requests throttled by rate limiter
+     this.promThrottledRequests = new promClient.Counter({
+       name: 'keeper_throttled_requests_total',
+       help: 'Total number of requests throttled by the rate limiter',
+       labelNames: ['limiter_name'],
+       registers: [this.register],
+     });
+
+     // Counter: Total tasks skipped due to quarantine
+     this.promTasksQuarantinedSkipped = new promClient.Counter({
+       name: 'keeper_tasks_quarantined_skipped_total',
+       help: 'Total number of tasks skipped because they are quarantined',
+       registers: [this.register],
+     });
+
+     // Gauge: Number of quarantined tasks
+     this.promQuarantinedCount = new promClient.Gauge({
+       name: 'keeper_quarantined_tasks_count',
+       help: 'Current number of tasks in quarantine',
+       registers: [this.register],
+     });
+
+     // Counter: Total tasks quarantined
+     this.promTotalQuarantined = new promClient.Counter({
+       name: 'keeper_tasks_quarantined_total',
+       help: 'Total number of tasks that have been quarantined',
+       registers: [this.register],
+     });
+
+     // Counter: Total tasks recovered from quarantine
+     this.promTotalRecovered = new promClient.Counter({
+       name: 'keeper_tasks_recovered_total',
+       help: 'Total number of tasks recovered from quarantine',
+       registers: [this.register],
+     });
+
+     // Gauge: Average fee paid in XLM
+     this.promAvgFee = new promClient.Gauge({
+       name: 'keeper_avg_fee_paid_xlm',
+       help: 'Average transaction fee paid in XLM (rolling average)',
+       registers: [this.register],
+     });
+
+     // Gauge: Last cycle duration
+     this.promCycleDuration = new promClient.Gauge({
+       name: 'keeper_last_cycle_duration_ms',
+       help: 'Duration of the last polling cycle in milliseconds',
+       registers: [this.register],
+     });
+
+     // Gauge: Low gas count
+     this.promLowGasCount = new promClient.Gauge({
+       name: 'keeper_low_gas_count',
+       help: 'Number of tasks with low gas balance',
+       registers: [this.register],
+     });
+
+     // Gauge: Keeper uptime
+     this.promUptime = new promClient.Gauge({
+       name: 'keeper_uptime_seconds',
+       help: 'Keeper service uptime in seconds since start',
+       registers: [this.register],
+     });
+
+     // Gauge: RPC connection status (1 = connected, 0 = disconnected)
+     this.promRpcConnected = new promClient.Gauge({
+       name: 'keeper_rpc_connected',
+       help: 'RPC connection status (1 = connected, 0 = disconnected)',
+       registers: [this.register],
+     });
+
+     // Gauge: Forecast - underfunded tasks
+     this.promUnderfundedTasks = new promClient.Gauge({
+       name: 'keeper_forecast_underfunded_tasks',
+       help: 'Number of tasks forecasted to be underfunded',
+       registers: [this.register],
+     });
+
+     // Gauge: Forecast - high confidence forecasts
+     this.promHighConfidenceForecasts = new promClient.Gauge({
+       name: 'keeper_forecast_high_confidence',
+       help: 'Number of tasks with high-confidence gas forecasts',
+       registers: [this.register],
+     });
+
+     // Gauge: Forecast - low confidence forecasts
+     this.promLowConfidenceForecasts = new promClient.Gauge({
+       name: 'keeper_forecast_low_confidence',
+       help: 'Number of tasks with low-confidence gas forecasts',
+       registers: [this.register],
+     });
+
+     // Gauge: Forecast - risk level (0=low, 1=medium, 2=high)
+     this.promForecastRiskLevel = new promClient.Gauge({
+       name: 'keeper_forecast_risk_level',
+       help: 'Current forecast risk level (0=low, 1=medium, 2=high)',
+       registers: [this.register],
+     });
+
+     // === SLO-SPECIFIC METRICS ===
+
+     // Histogram: Retry delay before retry attempt (seconds)
+     this.promRetryDelay = new promClient.Histogram({
+       name: 'keeper_retry_delay_seconds',
+       help: 'Seconds waited before a retry attempt is made',
+       buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60, 120],
+       registers: [this.register],
+     });
+
+     // Counter: Total retry attempts with outcome label
+     this.promRetryAttempts = new promClient.Counter({
+       name: 'keeper_retry_attempts_total',
+       help: 'Total number of retry attempts made during task execution',
+       labelNames: ['outcome'], // 'success', 'failure', 'duplicate'
+       registers: [this.register],
+     });
+
+     // Counter: Tasks that exceeded max retries
+     this.promRetriesExhausted = new promClient.Counter({
+       name: 'keeper_retries_exhausted_total',
+       help: 'Total number of tasks that exhausted all retry attempts',
+       registers: [this.register],
+     });
+
+     // Gauge: Current size of retry queue
+     this.promRetryQueueSize = new promClient.Gauge({
+       name: 'keeper_retry_queue_size',
+       help: 'Current number of tasks pending retry',
+       registers: [this.register],
+     });
+
+     // Histogram: Time spent in retry queue before next attempt
+     this.promRetryTimeInQueue = new promClient.Histogram({
+       name: 'keeper_retry_time_in_queue_seconds',
+       help: 'Seconds a task spent waiting in retry queue before next attempt',
+       buckets: [1, 5, 10, 30, 60, 300, 600, 1800],
+       registers: [this.register],
+     });
+
+     // Counter: Tasks meeting poll freshness SLO
+     this.promPollFreshnessSloSuccess = new promClient.Counter({
+       name: 'keeper_poll_freshness_slo_success_total',
+       help: 'Total polls that met the freshness SLO threshold',
+       registers: [this.register],
+     });
+
+     // Counter: Tasks missing poll freshness SLO
+     this.promPollFreshnessSloFailure = new promClient.Counter({
+       name: 'keeper_poll_freshness_slo_failure_total',
+       help: 'Total polls that missed the freshness SLO threshold',
+       registers: [this.register],
+     });
+
+     // Counter: Tasks meeting execution timeliness SLO
+     this.promExecutionTimelinessSloSuccess = new promClient.Counter({
+       name: 'keeper_execution_timeliness_slo_success_total',
+       help: 'Total tasks executed within the timeliness SLO threshold',
+       registers: [this.register],
+     });
+
+     // Counter: Tasks missing execution timeliness SLO
+     this.promExecutionTimelinessSloFailure = new promClient.Counter({
+       name: 'keeper_execution_timeliness_slo_failure_total',
+       help: 'Total tasks that missed the timeliness SLO threshold',
+       registers: [this.register],
+     });
+
+     // Gauge: SLO success rates (computed externally, exposed as gauges for alerting)
+     this.promPollFreshnessSloRate = new promClient.Gauge({
+       name: 'keeper_slo_poll_freshness_rate',
+       help: 'Rolling rate of poll freshness SLO success (0-1)',
+       registers: [this.register],
+     });
+
+     this.promExecutionTimelinessSloRate = new promClient.Gauge({
+       name: 'keeper_slo_execution_timeliness_rate',
+       help: 'Rolling rate of execution timeliness SLO success (0-1)',
+       registers: [this.register],
+     });
+
+     // Add default metrics (process CPU, memory, etc.)
+     promClient.collectDefaultMetrics({ register: this.register });
+   }
   setControlStateProvider(provider) {
     this.controlStateProvider = provider;
-  }
-
-  setControlActionHandler(handler) {
-    this.controlActionHandler = handler;
   }
 
   setWebhookHandler(handler, path = this.webhookPath) {
@@ -317,6 +842,31 @@ class MetricsServer {
       help: 'Number of tasks with low gas balance',
       registers: [this.register],
     });
+    this.promSlaChecks = new promClient.Counter({
+      name: 'keeper_sla_checks_total',
+      help: 'Total number of SLA evaluation cycles completed',
+      registers: [this.register],
+    });
+    this.promSlaViolations = new promClient.Counter({
+      name: 'keeper_sla_violations_total',
+      help: 'Total number of SLA violations detected',
+      registers: [this.register],
+    });
+    this.promSlaSlashed = new promClient.Counter({
+      name: 'keeper_sla_slashed_total',
+      help: 'Total number of keeper slashing actions submitted',
+      registers: [this.register],
+    });
+    this.promSlaLastCheckDuration = new promClient.Gauge({
+      name: 'keeper_sla_last_check_duration_ms',
+      help: 'Duration of the last SLA evaluation run in milliseconds',
+      registers: [this.register],
+    });
+    this.promSlaLastSlashAmount = new promClient.Gauge({
+      name: 'keeper_sla_last_slash_amount',
+      help: 'Amount slashed in the most recent SLA enforcement event',
+      registers: [this.register],
+    });
     this.promUptime = new promClient.Gauge({
       name: 'keeper_uptime_seconds',
       help: 'Keeper service uptime in seconds',
@@ -330,6 +880,16 @@ class MetricsServer {
     this.promRpcCircuitState = new promClient.Gauge({
       name: 'keeper_rpc_circuit_state',
       help: 'RPC circuit breaker state (0 = CLOSED, 1 = HALF_OPEN, 2 = OPEN)',
+      registers: [this.register],
+    });
+    this.promBacklogSize = new promClient.Gauge({
+      name: 'keeper_backlog_size',
+      help: 'Number of task IDs currently known to the keeper registry',
+      registers: [this.register],
+    });
+    this.promRetryBudgetPressure = new promClient.Gauge({
+      name: 'keeper_retry_budget_pressure',
+      help: 'Current global retry budget pressure as a fraction between 0 and 1',
       registers: [this.register],
     });
     this.promAdminPaused = new promClient.Gauge({
@@ -347,6 +907,26 @@ class MetricsServer {
       name: 'keeper_shard_skipped_tasks',
       help: 'Number of tasks skipped because they are assigned to another shard',
       labelNames: ['shard_label', 'shard_index'],
+      registers: [this.register],
+    });
+    this.promDbShardCount = new promClient.Gauge({
+      name: 'keeper_db_shard_count',
+      help: 'Number of Postgres database shards currently active',
+      registers: [this.register],
+    });
+    this.promDbShardActiveUsers = new promClient.Gauge({
+      name: 'keeper_db_shard_active_users',
+      help: 'Active user load used for Postgres shard scaling',
+      registers: [this.register],
+    });
+    this.promDbShardPendingTasks = new promClient.Gauge({
+      name: 'keeper_db_shard_pending_tasks',
+      help: 'Pending task volume used for Postgres shard scaling',
+      registers: [this.register],
+    });
+    this.promDbShardStrategy = new promClient.Gauge({
+      name: 'keeper_db_shard_strategy',
+      help: 'Current Postgres shard scaling mode (0 = fixed, 1 = auto)',
       registers: [this.register],
     });
     this.promDriftSeverity = new promClient.Gauge({
@@ -432,13 +1012,46 @@ class MetricsServer {
     this.promWebhookRejected.inc({ reason: 'none' }, 0);
     this.promWebhookReplayRejected.inc(0);
 
+    // Sync tasks skipped idempotency counter
+    this.promTasksSkippedIdempotency.inc(this.metrics.counters.tasksSkippedIdempotencyTotal);
+
+    // SLO: Poll freshness counters
+    this.promPollFreshnessSloSuccess.inc(this.metrics.counters.pollFreshnessSloSuccess);
+    this.promPollFreshnessSloFailure.inc(this.metrics.counters.pollFreshnessSloFailure);
+
+    // SLO: Execution timeliness counters
+    this.promExecutionTimelinessSloSuccess.inc(this.metrics.counters.executionTimelinessSloSuccess);
+    this.promExecutionTimelinessSloFailure.inc(this.metrics.counters.executionTimelinessSloFailure);
+
+    // SLO: Retry metrics
+    this.promRetryAttempts.inc({ outcome: 'success' }, this.metrics.counters.retryAttemptsTotal.success);
+    this.promRetryAttempts.inc({ outcome: 'failure' }, this.metrics.counters.retryAttemptsTotal.failure);
+    this.promRetryAttempts.inc({ outcome: 'duplicate' }, this.metrics.counters.retryAttemptsTotal.duplicate);
+    this.promRetriesExhausted.inc(this.metrics.counters.retriesExhausted);
+    this.promRetriesExecuted.inc(this.metrics.counters.retriesExecutedTotal);
+    this.promRetriesFailed.inc(this.metrics.counters.retriesFailedTotal);
+
+    // SLO gauges
+    this.promPollFreshnessSeconds.set(this.metrics.gauges.pollFreshnessSeconds);
+    this.promOldestTaskAgeSeconds.set(this.metrics.gauges.oldestTaskAgeSeconds);
+    this.promRetryQueueSize.set(this.metrics.gauges.retryQueueSize);
+    this.promPollFreshnessSloRate.set(this.metrics.gauges.pollFreshnessSloRate);
+    this.promExecutionTimelinessSloRate.set(this.metrics.gauges.executionTimelinessSloRate);
+
     this.promAvgFee.set(this.metrics.gauges.avgFeePaidXlm);
     this.promCycleDuration.set(this.metrics.gauges.lastCycleDurationMs);
     this.promRetryCycleDuration.set(this.metrics.gauges.lastRetryCycleDurationMs);
     this.promLowGasCount.set(this.gasMonitor.getLowGasCount());
+    this.promSlaChecks.inc(0);
+    this.promSlaViolations.inc(0);
+    this.promSlaSlashed.inc(0);
+    this.promSlaLastCheckDuration.set(this.metrics.gauges.slaLastCheckDurationMs);
+    this.promSlaLastSlashAmount.set(this.metrics.gauges.slaLastSlashAmount);
     this.promUptime.set(Math.floor((Date.now() - this.metrics.startTime) / 1000));
     this.promRpcConnected.set(this.metrics.rpcConnected ? 1 : 0);
     this.promRpcCircuitState.set(this.metrics.gauges.rpcCircuitState);
+    this.promBacklogSize.set(this.metrics.lastBacklogSize || 0);
+    this.promRetryBudgetPressure.set(this.metrics.retryPressure || 0);
     this.promAdminPaused.set(this.metrics.adminState.paused ? 1 : 0);
     this.promShardOwnedTasks.set(
       {
@@ -462,6 +1075,10 @@ class MetricsServer {
     this.promDriftTask.set(this.metrics.driftState.taskId || 0);
     this.promDriftWarningCount.set(this.metrics.driftState.warning || 0);
     this.promDriftCriticalCount.set(this.metrics.driftState.critical || 0);
+    this.promDbShardCount.set(this.metrics.dbShardState.dbShardCount);
+    this.promDbShardActiveUsers.set(this.metrics.dbShardState.activeUsers);
+    this.promDbShardPendingTasks.set(this.metrics.dbShardState.pendingTasks);
+    this.promDbShardStrategy.set(this.metrics.dbShardState.dbShardStrategy === 'auto' ? 1 : 0);
 
     if (this.retryBudgetTracker) {
       const budgetStats = this.retryBudgetTracker.getStats();
@@ -482,6 +1099,11 @@ class MetricsServer {
     }
   }
 
+    // Compute poll freshness dynamically based on last completion time
+    const freshnessSeconds = this.metrics.lastPollCompletedAt
+      ? Math.floor((Date.now() - this.metrics.lastPollCompletedAt.getTime()) / 1000)
+      : 0;
+    this.promPollFreshnessSeconds.set(freshnessSeconds);
   incrementBudgetExhausted(scope = 'global', reason = 'limit') {
     if (this.promBudgetExhausted) {
       this.promBudgetExhausted.inc({ scope, reason });
@@ -500,7 +1122,7 @@ class MetricsServer {
 
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
       if (req.method === 'OPTIONS') {
         res.writeHead(204);
@@ -540,48 +1162,12 @@ class MetricsServer {
 
       } else if (req.url === '/metrics/forecast' || req.url === '/metrics/forecast/') {
         this.handleForecast(res);
-
-      } else if (req.url === '/metrics/failure-risk' || req.url === '/metrics/failure-risk/') {
-        this.handleFailureRisk(res);
-
-      } else if (req.url === '/metrics/reputation' || req.url === '/metrics/reputation/') {
-        this.handleReputation(res);
-
-      } else if (req.url === '/metrics/slo' || req.url === '/metrics/slo/') {
-        this.handleSloMetrics(res);
-
-      } else if (req.url === '/admin/billing' || req.url === '/admin/billing/') {
-        protect(() => this.handleBilling(res))();
-
-
-        // 🔐 PROTECTED ROUTES START HERE
-
-      } else if (req.url === '/admin/reset' && req.method === 'POST') {
-        protect(() => {
-          this.metrics.reset();
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true }));
-        })();
-
-      } else if (req.url === '/admin/dead-letter') {
-        protect(() => this.handleDeadLetter(res))();
-
-      } else if (req.url.startsWith('/admin/dead-letter/')) {
-        protect(() => this.handleDeadLetterTask(req, res))();
-
-      } else if (url.pathname === this.webhookPath && this.webhookHandler) {
-        // Webhook requests (unauthenticated - auth handled by webhook handler)
-        this.webhookHandler.handle(req, res);
-
-        // ❌ NOT FOUND
-      } else if (url.pathname === '/drift' || url.pathname === '/drift/') {
-        this.handleDrift(res);
-      } else if (url.pathname === '/admin/keeper' || url.pathname === '/admin/keeper/') {
-        this.handleAdminState(req, res);
-      } else if (url.pathname === '/admin/keeper/pause' || url.pathname === '/admin/keeper/pause/') {
-        await this.handlePauseResume(req, res, true);
-      } else if (url.pathname === '/admin/keeper/resume' || url.pathname === '/admin/keeper/resume/') {
-        await this.handlePauseResume(req, res, false);
+      } else if (req.url === '/reconcile' || req.url === '/reconcile/') {
+        if (req.method === 'POST') {
+          this.handleReconcileTrigger(res);
+        } else {
+          this.handleReconcileStatus(res);
+        }
       } else {
         res.writeHead(404);
         res.end('Not Found');
@@ -596,6 +1182,137 @@ class MetricsServer {
         });
       }
     });
+
+    this.server.listen(this.port, () => {
+      this.logger.info(`Server running on port ${this.port}`);
+      this.logger.info(`WebSocket enabled on http://localhost:${this.port}`);
+    });
+  }
+
+   broadcast(event, data) {
+     if (this.io) {
+       this.io.emit(event, data);
+     }
+   }
+
+   // === SLO Metrics Recording Methods ===
+
+    /**
+     * Record poll cycle completion for freshness tracking.
+     * Call after a poll cycle finishes.
+     * @param {number} pollCycleDurationMs - Duration of the poll cycle in ms
+     * @param {number} intervalMs - Expected polling interval in ms (used for first cycle)
+     */
+    recordPollCycle(pollCycleDurationMs, intervalMs = this.metrics.pollIntervalMs) {
+      const now = Date.now();
+      const previousCompletion = this.metrics.lastPollCompletedAt ? this.metrics.lastPollCompletedAt.getTime() : null;
+      this.metrics.lastPollCompletedAt = new Date(now);
+
+      // Determine actual interval between poll completions
+      let actualIntervalMs = pollCycleDurationMs;
+      if (previousCompletion) {
+        actualIntervalMs = now - previousCompletion;
+      } else {
+        // First cycle: use configured interval as approximation
+        actualIntervalMs = intervalMs;
+      }
+
+      // Record poll interval histogram (seconds)
+      this.promPollInterval.observe(actualIntervalMs / 1000);
+
+      // SLO: Check if poll met freshness threshold (i.e., completed within expected interval)
+      if (actualIntervalMs <= this.metrics.sloThresholds.pollFreshnessMs) {
+        this.metrics.increment('pollFreshnessSloSuccess');
+      } else {
+        this.metrics.increment('pollFreshnessSloFailure');
+      }
+
+      this._computeSloRates();
+      this.broadcast('sync:metrics', this.metrics.snapshot());
+    }
+
+    /**
+     * Record task execution for timeliness SLO.
+     * Call when a task execution completes (success or failure).
+     * @param {number} taskId - The task ID
+     * @param {number} actualExecutionLedger - Ledger when execution completed
+     * @param {number} scheduledDueLedger - Ledger when task was due
+     * @param {boolean} success - Whether execution succeeded
+     */
+    recordTaskExecution({ taskId, actualExecutionLedger, scheduledDueLedger, success }) {
+      const latenessLedgers = Math.max(0, actualExecutionLedger - scheduledDueLedger);
+      this.promTaskLateness.observe(latenessLedgers);
+
+      // Convert to milliseconds assuming ~5s per ledger on testnet (configurable)
+      const avgLedgerTimeMs = parseInt(process.env.LEDGER_TIME_MS || '5000', 10);
+      const latenessMs = latenessLedgers * avgLedgerTimeMs;
+
+      // SLO: Check if execution met timeliness threshold
+      if (latenessMs <= this.metrics.sloThresholds.executionTimelinessMs) {
+        this.metrics.increment('executionTimelinessSloSuccess');
+      } else {
+        this.metrics.increment('executionTimelinessSloFailure');
+      }
+
+      this._computeSloRates();
+      this.broadcast('sync:metrics', this.metrics.snapshot());
+    }
+
+   /**
+    * Record retry attempt.
+    * @param {string} outcome - 'success', 'failure', or 'duplicate'
+    */
+   recordRetryAttempt(outcome) {
+     this.metrics.increment('retryAttemptsTotal', { outcome });
+   }
+
+   /**
+    * Record retry scheduling event.
+    * @param {number} delayMs - Delay before retry in milliseconds
+    */
+   recordRetryDelay(delayMs) {
+     this.promRetryDelay.observe(delayMs / 1000);
+   }
+
+   /**
+    * Record task time spent in retry queue before next attempt.
+    * @param {number} timeInQueueMs - Time spent waiting in milliseconds
+    */
+   recordRetryTimeInQueue(timeInQueueMs) {
+     this.promRetryTimeInQueue.observe(timeInQueueMs / 1000);
+   }
+
+   /**
+    * Update retry queue size gauge.
+    * @param {number} size - Current retry queue size
+    */
+   setRetryQueueSize(size) {
+     this.metrics.record('retryQueueSize', size);
+   }
+
+   /**
+    * Update oldest task age (time since last_run).
+    * @param {number} oldestAgeSeconds - Age in seconds of the oldest task
+    */
+   setOldestTaskAge(oldestAgeSeconds) {
+     this.metrics.record('oldestTaskAgeSeconds', oldestAgeSeconds);
+   }
+
+   /**
+    * Compute rolling SLO success rates.
+    * Called internally after each SLO observation.
+    */
+   _computeSloRates() {
+     const totalPoll = this.metrics.counters.pollFreshnessSloSuccess + this.metrics.counters.pollFreshnessSloFailure;
+     if (totalPoll > 0) {
+       this.metrics.record('pollFreshnessSloRate', this.metrics.counters.pollFreshnessSloSuccess / totalPoll);
+     }
+
+     const totalExec = this.metrics.counters.executionTimelinessSloSuccess + this.metrics.counters.executionTimelinessSloFailure;
+     if (totalExec > 0) {
+       this.metrics.record('executionTimelinessSloRate', this.metrics.counters.executionTimelinessSloSuccess / totalExec);
+     }
+   }
   }
 
   handleHealth(res) {
@@ -607,10 +1324,21 @@ class MetricsServer {
         retryBudget: this.retryBudgetTracker.getStats(),
       }),
     };
-    res.writeHead(status.status === 'stale' ? 503 : 200, {
+    res.writeHead(['stale', 'unhealthy'].includes(status.status) ? 503 : 200, {
       'Content-Type': 'application/json',
     });
     res.end(JSON.stringify(healthData, null, 2));
+  }
+
+  handleMetricsHistory(req, res) {
+    const url = new URL(req.url || '/metrics/history', 'http://localhost');
+    const limit = Math.min(
+      parseInt(url.searchParams.get('limit') || '60', 10),
+      this.metrics.history.maxSamples,
+    );
+    const samples = this.metrics.history.getSamples(limit);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ samples, count: samples.length }, null, 2));
   }
 
   handleMetrics(res) {
@@ -822,6 +1550,50 @@ class MetricsServer {
     });
   }
 
+  /**
+   * GET /reconcile — return the most recent reconciliation report, or a
+   * 204 No Content when no reconciliation has run yet.
+   */
+  handleReconcileStatus(res) {
+    if (!this.reconciler) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Reconciler not initialised' }));
+      return;
+    }
+
+    const report = this.reconciler.getLastReport();
+    if (!report) {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(report, null, 2));
+  }
+
+  /**
+   * POST /reconcile — trigger an immediate reconciliation pass.
+   * Returns 409 Conflict when one is already running.
+   * Returns 200 with the report on success.
+   */
+  handleReconcileTrigger(res) {
+    if (!this.reconciler) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Reconciler not initialised' }));
+      return;
+    }
+
+    this.reconciler.reconcile().then((report) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(report, null, 2));
+    }).catch((err) => {
+      const status = err.code === 'RECONCILIATION_IN_PROGRESS' ? 409 : 500;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message, code: err.code ?? null }));
+    });
+  }
+
   updateHealth(state) {
     this.metrics.updateHealth(state);
   }
@@ -836,13 +1608,39 @@ class MetricsServer {
       this.promTasksExecuted.inc(amount);
     } else if (key === 'tasksFailedTotal') {
       this.promTasksFailed.inc(amount);
+    } else if (key === 'tasksSkippedIdempotencyTotal') {
+      this.promTasksSkippedIdempotency.inc(amount);
     } else if (key === 'throttledRequestsTotal') {
+      this.promThrottledRequests.inc({ limiter_name: amount.name || 'unknown' }, amount.value || 1);
+    } else if (key === 'pollFreshnessSloSuccess') {
+      this.promPollFreshnessSloSuccess.inc(amount);
+    } else if (key === 'pollFreshnessSloFailure') {
+      this.promPollFreshnessSloFailure.inc(amount);
+    } else if (key === 'executionTimelinessSloSuccess') {
+      this.promExecutionTimelinessSloSuccess.inc(amount);
+    } else if (key === 'executionTimelinessSloFailure') {
+      this.promExecutionTimelinessSloFailure.inc(amount);
+    } else if (key === 'retriesExhausted') {
+      this.promRetriesExhausted.inc(amount);
+    } else if (key === 'retriesExecutedTotal') {
+      this.promRetriesExecuted.inc(amount);
+    } else if (key === 'retriesFailedTotal') {
+      this.promRetriesFailed.inc(amount);
+    } else if (key === 'retryAttemptsTotal' && typeof amount === 'object') {
+      const outcome = amount.outcome || 'unknown';
+      this.promRetryAttempts.inc({ outcome }, 1);
       this.promThrottledRequests.inc(
         { limiter_name: amount?.name || 'unknown' },
         amount?.value || 1,
       );
     } else if (key === 'adminStateChangesTotal') {
       this.promAdminStateChanges.inc(typeof amount === 'number' ? amount : 1);
+    } else if (key === 'slaChecksTotal') {
+      this.promSlaChecks.inc(typeof amount === 'number' ? amount : 1);
+    } else if (key === 'slaViolationsTotal') {
+      this.promSlaViolations.inc(typeof amount === 'number' ? amount : 1);
+    } else if (key === 'slaSlashedTotal') {
+      this.promSlaSlashed.inc(typeof amount === 'number' ? amount : 1);
     }
   }
 
@@ -852,15 +1650,33 @@ class MetricsServer {
       this.promAvgFee.set(this.metrics.gauges.avgFeePaidXlm);
     } else if (key === 'lastCycleDurationMs') {
       this.promCycleDuration.set(value);
+    } else if (key === 'pollFreshnessSeconds') {
+      this.promPollFreshnessSeconds.set(value);
+    } else if (key === 'oldestTaskAgeSeconds') {
+      this.promOldestTaskAgeSeconds.set(value);
+    } else if (key === 'retryQueueSize') {
+      this.promRetryQueueSize.set(value);
+    } else if (key === 'pollFreshnessSloRate') {
+      this.promPollFreshnessSloRate.set(value);
+    } else if (key === 'executionTimelinessSloRate') {
+      this.promExecutionTimelinessSloRate.set(value);
     } else if (key === 'lastRetryCycleDurationMs') {
       this.promRetryCycleDuration.set(value);
     } else if (key === 'rpcCircuitState') {
       this.promRpcCircuitState.set(value);
+    } else if (key === 'slaLastCheckDurationMs') {
+      this.promSlaLastCheckDuration.set(value);
+    } else if (key === 'slaLastSlashAmount') {
+      this.promSlaLastSlashAmount.set(value);
     }
   }
 
   updateShardState(state) {
     this.metrics.updateShardState(state);
+  }
+
+  updateDbShardState(state) {
+    this.metrics.updateDbShardState(state);
   }
 
   updateDriftState(state) {
@@ -892,4 +1708,4 @@ class MetricsServer {
   }
 }
 
-module.exports = { Metrics, MetricsServer };
+module.exports = { Metrics, MetricsHistory, MetricsServer };

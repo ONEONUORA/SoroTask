@@ -1,8 +1,51 @@
 require('@testing-library/jest-dom')
 const React = require('react')
 
+if (typeof global.fetch !== 'function') {
+  global.fetch = jest.fn(() =>
+    Promise.resolve({
+      ok: true,
+      json: async () => ({
+        riskScore: 18,
+        riskLevel: 'low',
+        confidence: 'high',
+        summary: 'Low risk predicted by test fallback.',
+        evidence: {
+          gasShortfall: false,
+          intervalTooFast: false,
+          contractReputation: 'Mock fallback prediction executed.',
+        },
+      } ),
+    })
+  )
+}
+
 // Mock environment variables for tests
 process.env.NEXT_PUBLIC_API_URL = 'http://localhost:3000'
+process.env.NEXT_PUBLIC_SENTRY_DSN = '' // Disable Sentry in tests by default
+
+// Mock Sentry
+jest.mock('@sentry/nextjs', () => ({
+  init: jest.fn(),
+  captureException: jest.fn(),
+  captureMessage: jest.fn(),
+  setUser: jest.fn(),
+  setContext: jest.fn(),
+  addBreadcrumb: jest.fn(),
+  setExtra: jest.fn(),
+  setTag: jest.fn(),
+  startTransaction: jest.fn(() => ({
+    setTag: jest.fn(),
+    setExtra: jest.fn(),
+    setData: jest.fn(),
+    finish: jest.fn(),
+  })),
+}))
+
+jest.mock('@sentry/react', () => ({
+  ErrorBoundary: ({ children }) => children,
+  withProfiler: (Component) => Component,
+}))
 
 // Suppress known Tiptap duplicate-extension warning in tests
 const originalWarn = console.warn.bind(console)

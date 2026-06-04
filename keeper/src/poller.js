@@ -7,18 +7,88 @@ const { SimulationCache } = require('./simulationCache');
 const { ReadBatcher } = require('./readBatcher');
 const crypto = require('crypto');
 
+function normalizeLogger(logger) {
+  const base = logger || createLogger('poller');
+  const normalized = { ...base };
+
+  for (const level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal']) {
+    normalized[level] = typeof base[level] === 'function'
+      ? base[level].bind(base)
+      : () => {};
+  }
+
+  normalized.childWithTrace = typeof base.childWithTrace === 'function'
+    ? (correlationId) => normalizeLogger(base.childWithTrace(correlationId))
+    : () => normalized;
+
+  return normalized;
+}
+
 /**
  * Production-grade polling engine for SoroTask Keeper.
  * Queries the contract for each known task and determines which tasks are due for execution
  * based on last_run + interval <= current_ledger_timestamp.
  */
 class TaskPoller {
+   constructor(server, contractId, options = {}) {
+     this.server = server;
+     this.contractId = contractId;
+
+     // Structured logger for poller module
+     this.logger = options.logger || createLogger('poller');
+     this.metricsServer = options.metricsServer;
+
+     // Configuration with defaults
+     this.maxConcurrentReads = parseInt(
+       options.maxConcurrentReads || process.env.MAX_CONCURRENT_READS || 10,
+       10,
+     );
+     this.maxReadsPerSecond = parseInt(
+       options.maxReadsPerSecond || process.env.MAX_READS_PER_SECOND || 20,
+       10,
+     );
+
+     // Create rate limiter for parallel task reads
+     this.readLimit = createRateLimiter({
+       concurrency: this.maxConcurrentReads,
+       rps: this.maxReadsPerSecond,
+       logger: this.logger,
+       name: 'poller-reads',
+       onThrottle: (event) => {
+         if (this.metricsServer) {
+           this.metricsServer.increment('throttledRequestsTotal', { name: event.name });
+         }
+       },
+     });
+
+     // Statistics
+     this.stats = {
+       lastPollTime: null,
+       tasksChecked: 0,
+       tasksDue: 0,
+       tasksSkipped: 0,
+       errors: 0,
+     };
+
+     this.lastCycleInsights = {
+       backlogSize: 0,
+       dueCount: 0,
+       dueSoonCount: 0,
+       minSecondsUntilDue: null,
+       avgRpcLatencyMs: 0,
+       cycleDurationMs: 0,
+       errors: 0,
+     };
+
+     // Track last due task details for metrics
+     this.lastDueTaskDetails = []; // Array of { taskId, dueLedger }
+   }
   constructor(server, contractId, options = {}) {
     this.server = server;
     this.contractId = contractId;
 
     // Structured logger for poller module
-    this.logger = options.logger || createLogger('poller');
+    this.logger = normalizeLogger(options.logger);
 
     // Optional pre-filter chain — eliminates non-actionable tasks before RPC calls
     this.filterChain = options.filterChain instanceof TaskFilterChain
@@ -30,6 +100,8 @@ class TaskPoller {
       || (options.metricsServer && options.metricsServer.sloMetrics)
       || null;
     this.historyManager = options.historyManager || null;
+    this.resolverRuntime = options.resolverRuntime || null;
+    this.resolverFailureMode = options.resolverFailureMode || process.env.RESOLVER_FAILURE_MODE || 'skip';
     this.shardLabel = options.shardLabel || null;
     this.driftWarningSeconds = parseInt(
       options.driftWarningSeconds || process.env.DRIFT_WARNING_SECONDS || 60,
@@ -151,6 +223,11 @@ class TaskPoller {
     this.stats.unacceptablyLate = 0;
     this.stats.errors = 0;
 
+    // Notify metrics that poll cycle started (for health staleness)
+    if (this.metricsServer) {
+      this.metricsServer.updateHealth({ lastPollAt: new Date(startTime) });
+    }
+
     const rpcLatencies = [];
     const secondsUntilDueValues = [];
 
@@ -253,6 +330,15 @@ class TaskPoller {
 
       // Collect due task IDs from successful checks
       const dueTaskIds = [];
+      const dueTaskDetails = []; // Track due ledger for each task
+
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled' && result.value) {
+          const { isDue, taskId, reason, nextRunTime } = result.value;
+
+          if (isDue) {
+            dueTaskIds.push(taskId);
+            dueTaskDetails.push({ taskId, dueLedger: nextRunTime });
       let warningDriftCount = 0;
       let criticalDriftCount = 0;
       let maxDriftSeconds = 0;
@@ -263,7 +349,11 @@ class TaskPoller {
           const { isDue, taskId, reason, correlationId } = result.value;
 
           if (isDue) {
-            dueTaskIds.push({ taskId, correlationId });
+            dueTaskIds.push(
+              includeContext
+                ? this.formatDueTask(result.value)
+                : taskId,
+            );
             this.stats.tasksDue++;
             if (result.value.isUnacceptablyLate) {
               this.stats.unacceptablyLate++;
@@ -292,7 +382,7 @@ class TaskPoller {
           this.stats.tasksChecked++;
         } else if (result.status === 'rejected') {
           this.stats.errors++;
-          this.logger.error('Error checking task', { taskId: taskIds[index], error: result.reason?.message || result.reason });
+          this.logger.error('Error checking task', { taskId: candidateIds[index], error: result.reason?.message || result.reason });
         }
       });
 
@@ -315,11 +405,18 @@ class TaskPoller {
         errors: this.stats.errors,
       };
 
+      // Store due task details for metrics and observers
+      this.lastDueTaskDetails = dueTaskDetails;
+
+      this.logPollSummary(duration);
       if (this.metricsServer) {
+        const retryStats = this.metricsServer.retryBudgetTracker?.getStats?.() || { global: { percentage: 0 } };
         this.metricsServer.increment('tasksCheckedTotal', this.stats.tasksChecked);
         this.metricsServer.updateHealth({
           lastPollAt: new Date(),
           rpcConnected: true,
+          backlogSize: taskIds.length,
+          retryBudgetPressure: retryStats.global?.percentage || 0,
         });
         this.metricsServer.updateDriftState({
           warning: warningDriftCount,
@@ -377,7 +474,30 @@ class TaskPoller {
     }
   }
 
+  formatDueTask(result) {
+    const context = {
+      pollCorrelationId: result.correlationId,
+    };
+
+    if (result.resolver) {
+      context.resolver = result.resolver;
+    }
+
+    return {
+      taskId: result.taskId,
+      correlationId: result.correlationId,
+      context,
+    };
+  }
+
   /**
+      * Check a single task to determine if it's due for execution.
+      *
+      * @param {number} taskId - The task ID to check
+      * @param {number} currentTimestamp - Current ledger timestamp
+      * @returns {Promise<{isDue: boolean, taskId: number, reason?: string, secondsUntilDue: number|null, nextRunTime: number|null}>}
+      */
+  async checkTask(taskId, currentTimestamp, registry) {
      * Check a single task to determine if it's due for execution.
      *
      * @param {number} taskId - The task ID to check
@@ -417,6 +537,8 @@ class TaskPoller {
       }
 
       if (!taskConfig) {
+        this.logger.warn('Task not found (may have been deregistered)', { taskId });
+        return { isDue: false, taskId, reason: 'not_found', secondsUntilDue: null, nextRunTime: null };
         taskLogger.warn('Task not found (may have been deregistered)', { taskId });
         return { isDue: false, taskId, reason: 'not_found', correlationId };
       }
@@ -435,6 +557,8 @@ class TaskPoller {
 
       // Check gas balance
       if (taskConfig.gas_balance <= 0) {
+        this.logger.warn('Task has insufficient gas balance', { taskId, gasBalance: taskConfig.gas_balance });
+        return { isDue: false, taskId, reason: 'skipped', secondsUntilDue: null, nextRunTime: null };
         taskLogger.warn('Task has insufficient gas balance', { taskId, gasBalance: taskConfig.gas_balance });
         return { isDue: false, taskId, reason: 'skipped', correlationId };
       }
@@ -447,7 +571,7 @@ class TaskPoller {
       }
 
       const effectiveNextRunTime = nextRunTime + jitter;
-      const isDue = effectiveNextRunTime <= currentTimestamp;
+      let isDue = effectiveNextRunTime <= currentTimestamp;
       const isStrictlyDue = nextRunTime <= currentTimestamp;
 
       let reason = null;
@@ -520,6 +644,25 @@ class TaskPoller {
         });
       }
 
+      let resolver = null;
+      if (isDue) {
+        resolver = await this.evaluateResolverGate(taskId, taskConfig, currentTimestamp, { correlationId, taskLogger });
+        if (resolver && !resolver.isReady) {
+          isDue = false;
+          reason = resolver.reason === 'error'
+            ? 'resolver_error'
+            : 'resolver_not_ready';
+
+          if (registry) {
+            registry.updateTask(taskId, {
+              scheduleStatus: 'resolver_blocked',
+              resolverId: resolver.resolverId,
+              resolverReason: resolver.reason || null,
+            });
+          }
+        }
+      }
+
       return {
         isDue,
         taskId,
@@ -530,13 +673,109 @@ class TaskPoller {
         secondsUntilDue: Number.isFinite(effectiveNextRunTime)
           ? Math.max(0, effectiveNextRunTime - currentTimestamp)
           : null,
+        nextRunTime,
         driftSeconds,
         driftSeverity,
+        resolver,
       };
 
     } catch (error) {
       taskLogger.error('Error checking task', { taskId, error: error.message });
       throw error;
+    }
+  }
+
+  getResolverId(taskConfig) {
+    const resolver = taskConfig && taskConfig.resolver;
+    if (!resolver) {
+      return null;
+    }
+
+    if (typeof resolver === 'string') {
+      return resolver.trim() || null;
+    }
+
+    if (typeof resolver === 'object') {
+      return resolver.id || resolver.name || resolver.resolver || null;
+    }
+
+    return null;
+  }
+
+  async evaluateResolverGate(taskId, taskConfig, currentTimestamp, options = {}) {
+    const resolverId = this.getResolverId(taskConfig);
+    if (!resolverId) {
+      return null;
+    }
+
+    const taskLogger = options.taskLogger || this.logger;
+
+    if (!this.resolverRuntime) {
+      taskLogger.warn('Task declares resolver but no resolver runtime is configured', {
+        taskId,
+        resolverId,
+      });
+      return null;
+    }
+
+    try {
+      const result = await this.resolverRuntime.evaluate(resolverId, {
+        taskId,
+        currentTimestamp,
+        taskConfig,
+      }, {
+        correlationId: options.correlationId,
+      });
+
+      if (!result.isReady) {
+        taskLogger.info('Resolver skipped task execution', {
+          taskId,
+          resolverId,
+          reason: result.reason || null,
+          durationMs: result.durationMs,
+        });
+      } else {
+        taskLogger.info('Resolver accepted task execution', {
+          taskId,
+          resolverId,
+          durationMs: result.durationMs,
+        });
+      }
+
+      return {
+        resolverId,
+        isReady: result.isReady,
+        reason: result.reason || null,
+        args: result.args || [],
+        metadata: result.metadata || null,
+        runtime: result.runtime,
+        durationMs: result.durationMs,
+      };
+    } catch (error) {
+      taskLogger.error('Resolver execution failed', {
+        taskId,
+        resolverId,
+        code: error.code || 'UNKNOWN',
+        error: error.message,
+      });
+
+      if (this.resolverFailureMode === 'allow') {
+        return {
+          resolverId,
+          isReady: true,
+          reason: 'fallback_allow',
+          error: error.message,
+          code: error.code || 'UNKNOWN',
+        };
+      }
+
+      return {
+        resolverId,
+        isReady: false,
+        reason: 'error',
+        error: error.message,
+        code: error.code || 'UNKNOWN',
+      };
     }
   }
 
@@ -789,10 +1028,10 @@ class TaskPoller {
   }
 
   /**
-   * Get current polling statistics.
-   *
-   * @returns {Object} Current statistics
-   */
+    * Get current polling statistics.
+    *
+    * @returns {Object} Current statistics
+    */
   getStats() {
     return { ...this.stats };
   }
@@ -802,6 +1041,13 @@ class TaskPoller {
   }
 
   /**
+    * Get details of tasks identified as due in the most recent poll.
+    * Includes scheduled due ledger for each task.
+    *
+    * @returns {Array<{taskId: number, dueLedger: number}>}
+    */
+  getLastDueTaskDetails() {
+    return [...this.lastDueTaskDetails];
    * Invalidate cached simulation data for one or more tasks.
    * Call this after a task is executed to ensure fresh data on next poll.
    *

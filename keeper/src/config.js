@@ -2,6 +2,14 @@ const dotenv = require('dotenv');
 
 dotenv.config();
 
+ export function loadConfig() {
+   const required = [
+     'SOROBAN_RPC_URL',
+     'NETWORK_PASSPHRASE',
+     'KEEPER_SECRET',
+     'CONTRACT_ID',
+     'POLLING_INTERVAL_MS',
+   ];
 function parseInteger(value, fallback) {
   const parsed = parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -33,22 +41,49 @@ function loadConfig() {
     'POLLING_INTERVAL_MS',
   ];
 
-  const missing = required.filter((key) => !process.env[key]);
+   const missing = required.filter((key) => !process.env[key]);
 
-  if (missing.length > 0) {
-    throw new Error(
-      `Missing required environment variables: ${missing.join(', ')}`,
-    );
-  }
+   if (missing.length > 0) {
+     throw new Error(
+       `Missing required environment variables: ${missing.join(', ')}`,
+     );
+   }
 
-  const inboundWebhooksEnabled = parseBoolean(process.env.INBOUND_WEBHOOKS_ENABLED, false);
-  const inboundWebhookSecrets = process.env.INBOUND_WEBHOOK_SECRETS
-    || process.env.INBOUND_WEBHOOK_SECRET
-    || '';
-  if (inboundWebhooksEnabled && !inboundWebhookSecrets) {
-    throw new Error('INBOUND_WEBHOOK_SECRET or INBOUND_WEBHOOK_SECRETS is required when INBOUND_WEBHOOKS_ENABLED=true');
-  }
+   const pollIntervalMs = parseInt(process.env.POLLING_INTERVAL_MS, 10) || 10000;
 
+   return {
+     rpcUrl: process.env.SOROBAN_RPC_URL,
+     networkPassphrase: process.env.NETWORK_PASSPHRASE,
+     keeperSecret: process.env.KEEPER_SECRET,
+     contractId: process.env.CONTRACT_ID,
+     pollIntervalMs,
+     minPollingIntervalMs:
+       parseInt(process.env.MIN_POLLING_INTERVAL_MS, 10) || 1000,
+     maxPollingIntervalMs:
+       parseInt(process.env.MAX_POLLING_INTERVAL_MS, 10) || 60000,
+     // Retry configuration
+     maxRetries: parseInt(process.env.MAX_RETRIES, 10) || 3,
+     retryBaseDelayMs: parseInt(process.env.RETRY_BASE_DELAY_MS, 10) || 1000,
+     maxRetryDelayMs: parseInt(process.env.MAX_RETRY_DELAY_MS, 10) || 30000,
+     // Circuit breaker configuration
+     circuitFailureThreshold:
+       parseInt(process.env.CIRCUIT_FAILURE_THRESHOLD, 10) || 5,
+     circuitRecoveryTimeoutMs:
+       parseInt(process.env.CIRCUIT_RECOVERY_TIMEOUT_MS, 10) || 30000,
+     // SLO configuration thresholds (in milliseconds)
+     sloPollFreshnessMs:
+       parseInt(process.env.SLO_POLL_FRESHNESS_MS, 10) || 60000, // Poll should complete within 60s
+     // Default to 3x poll interval if not set
+     sloExecutionTimelinessMs:
+       parseInt(process.env.SLO_EXECUTION_TIMELINESS_MS, 10) || (() => {
+         const base = parseInt(process.env.POLLING_INTERVAL_MS, 10) || 10000;
+         return base * 3;
+       })(),
+     // Logging configuration
+     logLevel: process.env.LOG_LEVEL || 'info',
+     nodeEnv: process.env.NODE_ENV || 'production',
+   };
+ }
   return {
     rpcUrl: process.env.SOROBAN_RPC_URL,
     networkPassphrase: process.env.NETWORK_PASSPHRASE,
@@ -79,9 +114,31 @@ function loadConfig() {
     shardIndex: parseInteger(process.env.KEEPER_SHARD_INDEX, 0),
     shardCount: parseInteger(process.env.KEEPER_SHARD_COUNT, 1),
     shardLabel: process.env.KEEPER_SHARD_LABEL || null,
+    shardId: parseInteger(process.env.KEEPER_SHARD_INDEX, 0),
+    totalShards: parseInteger(process.env.KEEPER_SHARD_COUNT, 1),
     driftWarningSeconds: parseInteger(process.env.DRIFT_WARNING_SECONDS, 60),
     driftCriticalSeconds: parseInteger(process.env.DRIFT_CRITICAL_SECONDS, 300),
+    slaMonitorEnabled: parseBoolean(process.env.SLA_MONITOR_ENABLED, false),
+    slaCheckIntervalMs: parseInteger(process.env.SLA_CHECK_INTERVAL_MS, 60000),
+    slaMinEvaluationWindow: parseInteger(process.env.SLA_MIN_EVALUATION_WINDOW, 10),
+    slaFailureThreshold: parseFloat(process.env.SLA_FAILURE_THRESHOLD) || 0.5,
+    slaSlashAmount: parseInteger(process.env.SLA_SLASH_AMOUNT, 100),
+    slaOperatorSecret: process.env.SLA_OPERATOR_SECRET || process.env.KEEPER_SECRET,
+    slaMaxRecentHistory: parseInteger(process.env.SLA_MAX_RECENT_HISTORY, 200),
     metricsResetOnStart: parseBoolean(process.env.METRICS_RESET_ON_START, false),
+    p2p: {
+      enabled: p2pEnabled,
+      nodeId: process.env.P2P_NODE_ID || null,
+      publicUrl: process.env.P2P_PUBLIC_URL || null,
+      listenHost: process.env.P2P_LISTEN_HOST || '0.0.0.0',
+      listenPort: parseInteger(process.env.P2P_LISTEN_PORT, 0),
+      sharedSecret: process.env.P2P_SHARED_SECRET || null,
+      bootstrapPeers: parseList(process.env.P2P_BOOTSTRAP_PEERS),
+      heartbeatIntervalMs: parseInteger(process.env.P2P_HEARTBEAT_INTERVAL_MS, 10000),
+      stalePeerMs: parseInteger(process.env.P2P_STALE_PEER_MS, 45000),
+      authWindowMs: parseInteger(process.env.P2P_AUTH_WINDOW_MS, 30000),
+      connectTimeoutMs: parseInteger(process.env.P2P_CONNECT_TIMEOUT_MS, 5000),
+    },
     // RPC Load Balancer Configuration
     rpcEndpoints: process.env.RPC_ENDPOINTS || null,
     rpcEndpointWeights: process.env.RPC_ENDPOINT_WEIGHTS || null,
@@ -119,6 +176,9 @@ function loadConfig() {
       replayTtlMs: parseInteger(process.env.INBOUND_WEBHOOK_REPLAY_TTL_MS, 600000),
       maxBodyBytes: parseInteger(process.env.INBOUND_WEBHOOK_MAX_BODY_BYTES, 1048576),
     },
+    resolverFunctionsConfig: process.env.RESOLVER_FUNCTIONS_CONFIG || null,
+    resolverDefaultTimeoutMs: parseInteger(process.env.RESOLVER_DEFAULT_TIMEOUT_MS, 250),
+    resolverFailureMode: process.env.RESOLVER_FAILURE_MODE || 'skip',
   };
 }
 

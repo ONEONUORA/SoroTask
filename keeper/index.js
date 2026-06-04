@@ -12,16 +12,19 @@ const { dryRunTask } = require("./src/dryRun");
 const { executeTaskWithRetry } = require("./src/executor");
 const { ExecutionIdempotencyGuard } = require("./src/idempotency");
 const { MetricsServer } = require("./src/metrics");
+const { GasMonitor } = require("./src/gasMonitor");
 const HistoryManager = require("./src/history");
 const { StreamHub } = require("./src/streamHub");
 const { ApiGateway } = require("./src/apiGateway");
 const { FailurePredictor, KeeperReputationScorer } = require("./src/insights");
 const { normalizeShardConfig, filterTasksForShard } = require("./src/sharding");
+const { PostgresShardManager } = require("./src/postgresShardManager");
 const { StartupValidator } = require("./src/validator");
+const { MetricsServer } = require("./src/metrics");
+const { GasMonitor } = require("./src/gasMonitor");
+const { RetryScheduler } = require("./src/retryScheduler");
 const { GracefulShutdownManager } = require("./src/gracefulShutdown");
 const { createDefaultFilterChain } = require("./src/taskFilter");
-const { WebhookAuthProtocol, InMemoryReplayStore } = require("./src/webhookAuth");
-const { WebhookTriggerHandler } = require("./src/webhookTrigger");
 
 // Create root logger for the main module
 const logger = createLogger("keeper");
@@ -96,7 +99,9 @@ async function main() {
     changedAt: null,
     actor: null,
   };
-  const metricsServer = new MetricsServer(undefined, createLogger("metrics"), null, {
+
+  const gasMonitor = new GasMonitor(createLogger("gasMonitor"));
+  const metricsServer = new MetricsServer(gasMonitor, createLogger("metrics"), null, {
     port: config.metricsPort,
     healthStaleThreshold: config.healthStaleThresholdMs,
     historyManager,
@@ -133,6 +138,14 @@ async function main() {
 
   metricsServer.start();
 
+  const slaMonitor = new SLAMonitor(server, config.contractId, config, {
+    historyManager,
+    metricsServer,
+    operatorKeypair: keypair,
+    logger: createLogger('sla-monitor'),
+  });
+  await slaMonitor.start();
+
   // Perform startup validation to fail fast on configuration errors
   const validator = new StartupValidator(
     server,
@@ -148,10 +161,44 @@ async function main() {
     process.exit(1);
   }
 
-  const idempotencyGuard = new ExecutionIdempotencyGuard({
-    logger: createLogger("idempotency"),
-  });
+   const idempotencyGuard = new ExecutionIdempotencyGuard({
+     logger: createLogger("idempotency"),
+   });
 
+   // Initialize retry scheduler
+   const retryScheduler = new RetryScheduler();
+   await retryScheduler.initialize();
+
+   // Initialize gas monitor
+   const gasMonitor = new GasMonitor(createLogger("gasMonitor"));
+
+   // Initialize metrics server
+   const metricsServer = new MetricsServer(gasMonitor, createLogger("metrics"));
+   metricsServer.setRegistry(null); // No registry needed for SLO metrics
+   metricsServer.start();
+
+   // Set SLO thresholds from config
+   metricsServer.metrics.setPollIntervalMs(config.pollIntervalMs);
+   metricsServer.metrics.setSloThreshold('pollFreshness', config.sloPollFreshnessMs);
+   metricsServer.metrics.setSloThreshold('executionTimeliness', config.sloExecutionTimelinessMs);
+
+   // Initialize polling engine with logger
+   const poller = new TaskPoller(server, config.contractId, {
+     maxConcurrentReads: process.env.MAX_CONCURRENT_READS,
+     logger: createLogger("poller"),
+     metricsServer,
+   });
+   logger.info("Poller initialized", { contractId: config.contractId });
+
+   // Initialize execution queue with retry scheduler and metrics
+    const queue = new ExecutionQueue(undefined, metricsServer, {
+      idempotencyGuard,
+      retryScheduler,
+    });
+    const queueLogger = createLogger("queue");
+
+    // Initialize queue (load retry scheduler state)
+    await queue.initialize();
   // Build the pre-filter chain — eliminates non-actionable tasks before RPC calls.
   // Filters run in order: null-guard → cached gas → cached timing → idempotency lock → circuit breaker.
   const filterChain = createDefaultFilterChain({
@@ -168,6 +215,8 @@ async function main() {
     simulationCacheMaxSize: process.env.SIMULATION_CACHE_MAX_SIZE,
     metricsServer,
     historyManager,
+    resolverRuntime,
+    resolverFailureMode: config.resolverFailureMode,
     shardLabel: shardConfig.shardLabel,
     driftWarningSeconds: config.driftWarningSeconds,
     driftCriticalSeconds: config.driftCriticalSeconds,
@@ -185,19 +234,32 @@ async function main() {
       attemptId: context?.attemptId || null,
     }),
   );
-  queue.on("task:started", (taskId, context) => {
-    metricsServer.publishTaskEvent("queue-started", taskId, {
-      attemptId: context?.attemptId || null,
-      pollCorrelationId: context?.pollCorrelationId || null,
-    });
-  });
-  queue.on("task:success", (taskId) => {
-    queueLogger.info("Task executed successfully", { taskId });
+  queue.on("task:success", (taskId, context, result) => {
+    queueLogger.info("Task executed successfully", { taskId, txHash: result?.txHash || null });
+    if (historyManager) {
+      historyManager.record({
+        kind: 'execution',
+        taskId,
+        keeper: keypair.publicKey(),
+        status: 'SUCCESS',
+        txHash: result?.txHash || null,
+        feePaid: result?.feePaid || null,
+      });
+    }
     shutdownManager.completeTask(taskId);
     metricsServer.publishTaskEvent("queue-success", taskId);
   });
-  queue.on("task:failed", (taskId, err) => {
+  queue.on("task:failed", (taskId, err, context) => {
     queueLogger.error("Task failed", { taskId, error: err.message });
+    if (historyManager) {
+      historyManager.record({
+        kind: 'execution',
+        taskId,
+        keeper: keypair.publicKey(),
+        status: 'FAILED',
+        error: err.message,
+      });
+    }
     shutdownManager.failTask(taskId, err);
     poller.invalidateCache(taskId);
     metricsServer.publishTaskEvent("queue-failed", taskId, { error: err.message });
@@ -223,7 +285,7 @@ async function main() {
   // Task executor function - calls contract.execute(keeper, task_id)
   // In dry-run mode, simulates the transaction without submitting it.
   const executeTask = async (taskId, context = {}) => {
-    const correlationId = context.correlationId || context.attemptId;
+    const correlationId = context.correlationId || context.pollCorrelationId || context.attemptId;
     const taskLogger = correlationId ? logger.childWithTrace(correlationId) : logger;
     
     const account = await server.getAccount(keypair.publicKey());
@@ -261,7 +323,26 @@ async function main() {
       return;
     }
 
+     try {
+       const retryResult = await executeTaskWithRetry(taskId, deps, {
+         attemptId: context.attemptId,
+         logger,
+         onRetry: (_error, _attempt, _delay, retryContext) => {
+           idempotencyGuard.touchRetry(taskId, {
+             lastError: retryContext?.message || null,
+           });
+           if (metricsServer) {
+             metricsServer.recordRetryDelay(_delay);
+           }
+         },
+       });
     try {
+      const dynamicFeeMultiplier = gasMonitor && typeof gasMonitor.getDynamicFeeMultiplier === 'function'
+        ? gasMonitor.getDynamicFeeMultiplier()
+        : 1;
+      deps.dynamicFeeMultiplier = dynamicFeeMultiplier;
+      deps.gasMonitor = gasMonitor;
+
       const retryResult = await executeTaskWithRetry(taskId, deps, {
         attemptId: context.attemptId,
         correlationId,
@@ -369,121 +450,54 @@ async function main() {
   });
   await registry.init();
 
-  const p2pNetwork = new KeeperP2PNetwork({
-    ...config.p2p,
-    nodeId: config.p2p.nodeId || keypair.publicKey(),
-    logger: createLogger("p2p"),
-    loadProvider: () => {
-      const queueStatus = queue.getInFlightStatus();
-      return {
-        capacity: queue.concurrencyLimit,
-        inFlight: queueStatus.inFlight,
-        queueDepth: queueStatus.depth,
-        taskCount: registry.getTaskIds().length,
-        paused: controlState.paused,
-        dryRun: DRY_RUN,
-      };
-    },
-  });
-  metricsServer.setP2PStateProvider(() => p2pNetwork.getStateSnapshot());
+  // Initialize reconciler — detects and repairs drift between local registry
+  // and on-chain truth. Runs on startup and then on a configurable interval.
+  const reconciler = new TaskReconciler(
+    { poller, registry },
+    { logger: createLogger("reconciler") },
+  );
+
+  // Startup reconciliation: repair any drift accumulated while the keeper was
+  // offline (missed events, another keeper executing tasks, etc.).
+  logger.info("Running startup reconciliation");
   try {
-    await p2pNetwork.start();
-  } catch (error) {
-    logger.error("P2P network failed to start; falling back to local shard ownership", {
-      error: error.message,
+    const startupReport = await reconciler.reconcile();
+    logger.info("Startup reconciliation complete", {
+      checked: startupReport.checked,
+      drifted: startupReport.drifted,
+      repaired: startupReport.repaired,
+      errors: startupReport.errors,
     });
+  } catch (err) {
+    logger.warn("Startup reconciliation failed — continuing", { error: err.message });
   }
 
-  // Initialize graceful shutdown manager
-  const shutdownManager = new GracefulShutdownManager({
-    logger: createLogger("shutdown"),
-    drainTimeoutMs: parseInt(
-      process.env.SHUTDOWN_DRAIN_TIMEOUT_MS || 30000,
-      10
-    ),
-    forceTimeoutMs: parseInt(
-      process.env.SHUTDOWN_FORCE_TIMEOUT_MS || 60000,
-      10
-    ),
-  });
+  // Periodic reconciliation: catch slow drift between polling cycles.
+  // Default: every 5 minutes. Override via RECONCILE_INTERVAL_MS env var.
+  const reconcileIntervalMs = parseInt(
+    process.env.RECONCILE_INTERVAL_MS || String(5 * 60 * 1000),
+    10,
+  );
+  logger.info("Scheduling periodic reconciliation", { intervalMs: reconcileIntervalMs });
 
-  // Register polling interval for cleanup
-  shutdownManager.registerResource("polling-interval", async () => {
-    logger.info("Clearing polling interval");
-    clearInterval(pollingInterval);
-  });
-
-  // Register queue for graceful draining
-  shutdownManager.registerResource("execution-queue", async () => {
-    logger.info("Starting queue graceful shutdown");
-    const result = await queue.gracefulShutdown({
-      drainTimeoutMs: parseInt(
-        process.env.SHUTDOWN_DRAIN_TIMEOUT_MS || 30000,
-        10
-      ),
-      onProgress: (progress) => {
-        logger.debug("Queue shutdown progress", progress);
-      },
-    });
-
-    logger.info("Queue shutdown complete", result);
-
-    // Report final queue status
-    const status = queue.getInFlightStatus();
-    if (status.inFlight > 0) {
-      logger.warn("Queue shutdown: Still in-flight tasks remaining", {
-        ...status,
-      });
+  const reconcileInterval = setInterval(async () => {
+    try {
+      logger.info("Starting periodic reconciliation");
+      const report = await reconciler.reconcile();
+      if (report.drifted > 0) {
+        logger.warn("Periodic reconciliation found and repaired drift", {
+          drifted: report.drifted,
+          repaired: report.repaired,
+        });
+      }
+    } catch (err) {
+      // RECONCILIATION_IN_PROGRESS is expected if the interval fires while a
+      // previous pass (e.g. from a POST /reconcile request) is still running.
+      if (err.code !== "RECONCILIATION_IN_PROGRESS") {
+        logger.error("Periodic reconciliation error", { error: err.message });
+      }
     }
-  });
-
-  // Register registry cleanup
-  shutdownManager.registerResource("task-registry", async () => {
-    logger.info("Closing task registry");
-    if (registry.close) {
-      await registry.close();
-    }
-  });
-
-  shutdownManager.registerResource("p2p-network", async () => {
-    logger.info("Stopping P2P network");
-    await p2pNetwork.stop();
-  });
-
-  // Register server cleanup
-  shutdownManager.registerResource("rpc-server", async () => {
-    logger.info("Closing RPC server connection");
-    // Server doesn't have explicit close, but we log it
-  });
-
-  // Register idempotency guard persistence
-  shutdownManager.registerResource("idempotency-guard", async () => {
-    logger.info("Finalizing idempotency state");
-    const snapshot = idempotencyGuard.getSnapshot();
-    logger.info("Idempotency state at shutdown", {
-      stateFile: snapshot.stateFile,
-      lockCount: snapshot.lockCount,
-      completedCount: snapshot.completedCount,
-    });
-  });
-
-  // Initialize and start listening for signals
-  shutdownManager.init();
-
-  // Listen to shutdown events for additional logging
-  shutdownManager.on("shutdown:initiated", ({ signal, reason }) => {
-    logger.warn("Shutdown initiated", { signal, reason });
-  });
-
-  shutdownManager.on("shutdown:stop-accepting", () => {
-    logger.info("Stopped accepting new work");
-    // Stop the polling loop explicitly
-    clearInterval(pollingInterval);
-  });
-
-  shutdownManager.on("shutdown:force", () => {
-    logger.warn("Force shutdown initiated - remaining tasks will be cancelled");
-  });
+  }, reconcileIntervalMs);
 
   const selectTaskOwnership = (taskIds) => {
     if (p2pNetwork.isHealthy()) {
@@ -506,6 +520,9 @@ async function main() {
     totalShards: config.totalShards
   });
 
+   const pollingInterval = setInterval(async () => {
+     try {
+       logger.info("Starting new polling cycle");
   const pollingInterval = setInterval(async () => {
     // Don't accept new work during shutdown
     if (shutdownManager.state !== "running") {
@@ -528,6 +545,11 @@ async function main() {
 
       // Get list of all registered task IDs
       const taskIds = registry.getTaskIds();
+      const dbShardState = dbShardManager.refresh({
+        activeUsers: queue.getInFlightStatus().inFlight,
+        pendingTasks: taskIds.length,
+      });
+      metricsServer.updateDbShardState(dbShardState);
       const shardSelection = selectTaskOwnership(taskIds);
       metricsServer.updateShardState({
         shardIndex: shardSelection.shardIndex,
@@ -554,6 +576,7 @@ async function main() {
       const dueTaskIds = await poller.pollDueTasks(shardSelection.ownedTaskIds, {
         registry,
         idempotencyGuard,
+        includeContext: true,
       });
 
       if (dueTaskIds.length > 0) {
@@ -566,30 +589,87 @@ async function main() {
           activeLocks: lockSnapshot.lockCount,
         });
 
-        // Track tasks before enqueueing
-        dueTaskIds.forEach((taskId) =>
-          shutdownManager.trackTask(taskId)
+        dueTaskIds.forEach((task) =>
+          shutdownManager.trackTask(typeof task === "object" ? task.taskId : task)
         );
 
         await queue.enqueue(dueTaskIds, executeTask);
-        
-        // Transform the dueTask results to pass correlation IDs to the queue
-        const tasksToEnqueue = dueTaskIds.map(d => ({
-          taskId: d.taskId,
-          context: { pollCorrelationId: d.correlationId }
-        }));
-        
-        await queue.enqueue(tasksToEnqueue, executeTask);
       } else {
         logger.info("No tasks due for execution");
       }
 
-      logger.info("Polling cycle complete");
-    } catch (error) {
-      logger.error("Error in polling cycle", { error: error.message });
-    }
-  }, pollingIntervalMs);
+       // Poll for new TaskRegistered events
+       await registry.poll();
 
+       // Get list of all registered task IDs
+       const taskIds = registry.getTaskIds();
+       logger.info("Checking tasks", { taskCount: taskIds.length });
+
+       // Poll for due tasks
+       const dueTaskIds = await poller.pollDueTasks(taskIds);
+
+       // Update oldest task age metric
+       if (metricsServer) {
+         const tasksWithStats = registry.getTasksWithStats();
+         const nowLedger = await server.getLatestLedger();
+         let oldestAgeSec = 0;
+         if (tasksWithStats.length > 0) {
+           oldestAgeSec = Math.max(...tasksWithStats.map(t => {
+             const lastRun = t.last_run || 0;
+             return nowLedger.sequence - lastRun;
+           }));
+         }
+         metricsServer.setOldestTaskAge(oldestAgeSec);
+       }
+
+       // Process retries and due tasks in parallel
+       const readyRetries = queue.getReadyRetries(parseInt(process.env.MAX_RETRIES_PER_CYCLE || '5', 10));
+       await Promise.all([
+         queue.enqueueRetries(readyRetries, executeTask),
+         queue.enqueue(poller.getLastDueTaskDetails(), executeTask),
+       ]);
+
+       // Record poll cycle completion for freshness SLO
+       const cycleTime = poller.getCycleInsights().cycleDurationMs || config.pollIntervalMs;
+       metricsServer.recordPollCycle(cycleTime, config.pollIntervalMs);
+
+       logger.info("Polling cycle complete");
+     } catch (error) {
+       logger.error("Error in polling cycle", { error: error.message });
+     }
+   }, pollingIntervalMs);
+
+   // Graceful shutdown handling
+   const shutdown = async (signal) => {
+     logger.info("Received shutdown signal, starting graceful shutdown", {
+       signal,
+     });
+     clearInterval(pollingInterval);
+     await queue.drain();
+     await retryScheduler.shutdown();
+     await metricsServer.stop();
+     logger.info("Graceful shutdown complete, exiting");
+     process.exit(0);
+   };
+
+   process.on("SIGTERM", () => shutdown("SIGTERM"));
+   process.on("SIGINT", () => shutdown("SIGINT"));
+
+    // Run first poll immediately
+    logger.info("Running initial poll");
+    setTimeout(async () => {
+      try {
+        const taskIds = registry.getTaskIds();
+        await poller.pollDueTasks(taskIds);
+        const readyRetries = queue.getReadyRetries(parseInt(process.env.MAX_RETRIES_PER_CYCLE || '5', 10));
+        await Promise.all([
+          queue.enqueueRetries(readyRetries, executeTask),
+          queue.enqueue(poller.getLastDueTaskDetails(), executeTask),
+        ]);
+        const cycleTime = poller.getCycleInsights().cycleDurationMs || config.pollIntervalMs;
+        metricsServer.recordPollCycle(cycleTime, config.pollIntervalMs);
+      } catch (error) {
+        logger.error("Error in initial poll", { error: error.message });
   let isShuttingDown = false;
   const shutdownTimeoutMs = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '30000', 10);
 
@@ -605,27 +685,7 @@ async function main() {
       shutdownTimeoutMs,
     });
     clearInterval(pollingInterval);
-
-    const gracefulShutdown = async () => {
-      await queue.shutdown();
-    };
-
-    try {
-      await Promise.race([
-        gracefulShutdown(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Shutdown timeout exceeded')), shutdownTimeoutMs),
-        ),
-      ]);
-      logger.info('Graceful shutdown complete, exiting', { signal });
-      process.exit(0);
-    } catch (error) {
-      logger.error('Graceful shutdown failed or timed out', {
-        signal,
-        error: error.message,
-      });
-      process.exit(1);
-    }
+    clearInterval(reconcileInterval);
     await queue.drain();
     metricsServer.stop();
     logger.info("Graceful shutdown complete, exiting");
@@ -661,19 +721,16 @@ async function main() {
       const shardSelection = selectTaskOwnership(taskIds);
       const dueTaskIds = controlState.paused
         ? []
-        : await poller.pollDueTasks(shardSelection.ownedTaskIds, { registry, idempotencyGuard });
+        : await poller.pollDueTasks(shardSelection.ownedTaskIds, {
+          registry,
+          idempotencyGuard,
+          includeContext: true,
+        });
       if (dueTaskIds.length > 0) {
-        const tasksToEnqueue = dueTaskIds.map(d => ({
-          taskId: d.taskId,
-          context: { pollCorrelationId: d.correlationId }
-        }));
-        await queue.enqueue(tasksToEnqueue, executeTask);
+        await queue.enqueue(dueTaskIds, executeTask);
       }
-    } catch (error) {
-      logger.error("Error in initial poll", { error: error.message });
-    }
-  }, 1000);
-}
+    }, 1000);
+  }
 
 main().catch((err) => {
   logger.fatal("Fatal Keeper Error", { error: err.message, stack: err.stack });

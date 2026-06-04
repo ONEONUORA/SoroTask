@@ -8,6 +8,7 @@ const {
 } = require("@stellar/stellar-sdk");
 const { withRetry, ErrorClassification } = require("./retry.js");
 const { createLogger } = require("./logger.js");
+const { createStructuredError, fromError } = require("./structuredErrors.js");
 
 const POLL_ATTEMPTS = 30;
 const POLL_INTERVAL_MS = 2000;
@@ -37,54 +38,63 @@ async function pollTransaction(server, txHash, options = {}) {
               ?.totalNonRefundableResourceFeeCharged?.(),
           ) || 0
         : 0;
-      return { status: "SUCCESS", feePaid };
+      // Extract ledger and close time if available
+      const ledger = response.latestLedger || response.ledger || null;
+      const closeTime = response.latestLedgerCloseTime || response.closeTime || null;
+      return { status: "SUCCESS", feePaid, ledger, closeTime };
     }
 
     if (response.status === SorobanRpc.GetTransactionStatus.FAILED) {
-      return { status: "FAILED", feePaid: 0 };
+      return { status: "FAILED", feePaid: 0, ledger: null, closeTime: null };
     }
 
     // NOT_FOUND means still pending — wait and retry
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 
-  return { status: "TIMEOUT", feePaid: 0 };
+  return { status: "TIMEOUT", feePaid: 0, ledger: null, closeTime: null };
 }
 
-function normalizeSubmissionError(error, fallbackCode) {
+function normalizeSubmissionError(error, fallbackCode, correlationId) {
   if (!error) {
-    return Object.assign(new Error("Unknown submission failure"), {
+    return createStructuredError({
       code: fallbackCode || "UNKNOWN",
+      message: "Unknown submission failure",
+      correlationId,
     });
   }
 
-  if (error.code) {
+  if (error.isStructuredError) {
     return error;
   }
 
   const message = error.message || String(error);
   const lower = message.toLowerCase();
+  let code = error.code || error.errorCode || fallbackCode || "UNKNOWN";
 
   if (lower.includes("duplicate") || lower.includes("already in ledger")) {
-    return Object.assign(new Error(message), { code: "DUPLICATE_TRANSACTION" });
-  }
-  if (lower.includes("timeout") || lower.includes("timed out")) {
-    return Object.assign(new Error(message), { code: "TIMEOUT_ERROR" });
-  }
-  if (
+    code = "DUPLICATE_TRANSACTION";
+  } else if (lower.includes("timeout") || lower.includes("timed out")) {
+    code = "TIMEOUT_ERROR";
+  } else if (
     lower.includes("network") ||
     lower.includes("fetch failed") ||
     lower.includes("socket hang up")
   ) {
-    return Object.assign(new Error(message), { code: "NETWORK_ERROR" });
+    code = "NETWORK_ERROR";
   }
 
-  return Object.assign(new Error(message), { code: fallbackCode || "UNKNOWN" });
+  return createStructuredError({
+    code,
+    message,
+    correlationId,
+    cause: error instanceof Error ? error : undefined,
+  });
 }
 
 async function executeTaskOnce(
   taskId,
-  { server, keypair, account, contractId, networkPassphrase, correlationId, logger: customLogger },
+  { server, keypair, account, contractId, networkPassphrase, correlationId, transactionFeeMultiplier, logger: customLogger },
 ) {
   const taskLogger = customLogger || logger;
   const contract = new Contract(contractId);
@@ -92,8 +102,10 @@ async function executeTaskOnce(
     xdr.Uint64.fromString(taskId.toString()),
   );
 
+  const multiplier = Number(transactionFeeMultiplier) > 0 ? Number(transactionFeeMultiplier) : 1;
+  const fee = Math.max(BASE_FEE, Math.round(BASE_FEE * multiplier));
   const tx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
+    fee,
     networkPassphrase: networkPassphrase || Networks.FUTURENET,
   })
     .addOperation(contract.call("execute", taskIdScVal))
@@ -105,12 +117,14 @@ async function executeTaskOnce(
     taskLogger.debug("Simulating task execution", { taskId, correlationId });
     simResult = await server.simulateTransaction(tx);
   } catch (error) {
-    throw normalizeSubmissionError(error, "NETWORK_ERROR");
+    throw normalizeSubmissionError(error, "NETWORK_ERROR", correlationId);
   }
 
   if (SorobanRpc.Api.isSimulationError(simResult)) {
-    throw Object.assign(new Error(`Simulation failed: ${simResult.error}`), {
+    throw createStructuredError({
       code: "SIMULATION_FAILED",
+      message: `Simulation failed: ${simResult.error}`,
+      correlationId,
     });
   }
 
@@ -122,7 +136,7 @@ async function executeTaskOnce(
     taskLogger.debug("Submitting transaction", { taskId, correlationId });
     sendResult = await server.sendTransaction(preparedTx);
   } catch (error) {
-    throw normalizeSubmissionError(error, "NETWORK_ERROR");
+    throw normalizeSubmissionError(error, "NETWORK_ERROR", correlationId);
   }
 
   const txHash = sendResult.hash || null;
@@ -140,27 +154,36 @@ async function executeTaskOnce(
         "Transaction submission error",
     );
     throw normalizeSubmissionError(
-      Object.assign(new Error(`Send failed: ${sendError}`), {
+      createStructuredError({
         code: /duplicate|already in ledger/i.test(sendError)
           ? "DUPLICATE_TRANSACTION"
           : "INVALID_TRANSACTION",
+        message: `Send failed: ${sendError}`,
+        correlationId,
       }),
+      undefined,
+      correlationId,
     );
   }
 
+  const { status, feePaid, ledger, closeTime } = await pollTransaction(server, sendResult.hash);
   const { status, feePaid } = await pollTransaction(server, sendResult.hash, { logger: taskLogger });
   if (status === "FAILED") {
-    throw Object.assign(new Error("Transaction reached FAILED status"), {
+    throw createStructuredError({
       code: "TX_FAILED",
+      message: "Transaction reached FAILED status",
+      correlationId,
     });
   }
   if (status === "TIMEOUT") {
-    throw Object.assign(new Error("Transaction polling timed out"), {
+    throw createStructuredError({
       code: "TIMEOUT_ERROR",
+      message: "Transaction polling timed out",
+      correlationId,
     });
   }
 
-  return { taskId, txHash, status, feePaid, error: null };
+  return { taskId, txHash, status, feePaid, ledger, closeTime, error: null };
 }
 
 /**
@@ -173,12 +196,13 @@ async function executeTaskOnce(
  * @param {import('@stellar/stellar-sdk').Account} deps.account  - fresh Account for sequence tracking
  * @param {string} deps.contractId
  * @param {string} deps.networkPassphrase
- * @returns {Promise<{taskId, txHash: string|null, status: string, feePaid: number, error: string|null}>}
+ * @returns {Promise<{taskId, txHash: string|null, status: string, feePaid: number, error: string|null, ledger: number|null, closeTime: number|null}>}
  */
 async function executeTask(
   taskId,
   { server, keypair, account, contractId, networkPassphrase, correlationId },
 ) {
+  /** @type {{taskId, txHash: string|null, status: string, feePaid: number, error: string|null, ledger: number|null, closeTime: number|null}} */
   const taskLogger = correlationId ? logger.childWithTrace(correlationId) : logger;
   /** @type {{taskId, txHash: string|null, status: string, feePaid: number, error: string|null}} */
   const result = {
@@ -187,6 +211,8 @@ async function executeTask(
     status: "PENDING",
     feePaid: 0,
     error: null,
+    ledger: null,
+    closeTime: null,
   };
 
   try {
@@ -197,26 +223,41 @@ async function executeTask(
       contractId,
       networkPassphrase,
       correlationId,
+      transactionFeeMultiplier: deps.dynamicFeeMultiplier,
       logger: taskLogger,
     });
     result.txHash = executionResult.txHash;
     result.status = executionResult.status;
     result.feePaid = executionResult.feePaid;
+    result.ledger = executionResult.ledger;
+    result.closeTime = executionResult.closeTime;
+
+    if (deps.gasMonitor && typeof deps.gasMonitor.recordExecution === 'function') {
+      deps.gasMonitor.recordExecution(taskId, result.feePaid);
+    }
 
     taskLogger.info("Transaction finalised", {
       taskId,
       txHash: result.txHash,
+      status,
+      feePaid,
+      ledger: result.ledger,
       status: result.status,
       feePaid: result.feePaid,
       correlationId,
     });
   } catch (err) {
+    const structured = fromError(err, { correlationId });
     result.status = "FAILED";
-    result.error = err.message || String(err);
+    result.error = structured.message;
+    result.errorCode = structured.code;
+    result.errorCategory = structured.category;
     logger.error("executeTask failed", {
       taskId,
       txHash: result.txHash,
-      error: result.error,
+      errorCode: structured.code,
+      errorCategory: structured.category,
+      error: structured.message,
       correlationId,
     });
   }
