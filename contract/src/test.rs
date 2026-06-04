@@ -49,7 +49,7 @@ fn test_get_non_existent_task() {
 #[test]
 fn test_batch_execute() {
     let env = Env::default();
-    let contract_id = env.register(SoroTaskContract, ());
+    let contract_id = env.register_contract(None, SoroTaskContract);
     let client = SoroTaskContractClient::new(&env, &contract_id);
 
     let creator = Address::generate(&env);

@@ -53,18 +53,6 @@ pub enum Error {
     InvalidYieldStrategy = 25,
     YieldHarvestFailed = 26,
     InsufficientYield = 27,
-    KeeperNotFound = 28,
-    InsufficientStake = 29,
-    InvalidSlashAmount = 30,
-    // Oracle-related errors
-    OracleNotSet = 31,
-    OracleRequestFailed = 32,
-    OracleInvalidResponse = 33,
-    OracleTimeout = 34,
-    OracleUnsupportedProvider = 35,
-    UpgradeNotInitialized = 36,
-    InvalidUpgradeVersion = 37,
-}
 
 /// Maximum number of arguments allowed in a task payload
 const MAX_ARGS_COUNT: u32 = 32;
@@ -140,8 +128,8 @@ pub struct DependencyRule {
 #[derive(Clone, Debug)]
 pub struct Portfolio {
     pub creator: Address,
-    pub name: Bytes,
-    pub description: Bytes,
+    pub name: Vec<u8>,
+    pub description: Vec<u8>,
     pub created_at: u64,
     pub is_active: bool,
     pub task_count: u64,
@@ -182,174 +170,6 @@ pub struct PortfolioStatistics {
     pub created_at: u64,
 }
 
-/// State channel configuration
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StateChannel {
-    /// Channel ID
-    pub channel_id: u64,
-    /// Participants in the channel
-    pub participants: Vec<Address>,
-    /// Current balances for each participant
-    pub balances: Vec<i128>,
-    /// Last settlement timestamp
-    pub last_settlement: u64,
-    /// Settlement interval (in seconds)
-    pub settlement_interval: u64,
-    /// Is the channel active
-    pub is_active: bool,
-    /// Channel nonce for update verification
-    pub nonce: u64,
-}
-
-/// State channel update containing off-chain computation results
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StateChannelUpdate {
-    /// Channel ID
-    pub channel_id: u64,
-    /// Update nonce (must be greater than previous nonce)
-    pub nonce: u64,
-    /// Hash of the updated state
-    pub state_hash: Bytes,
-    /// Micro-tasks to execute as part of this settlement
-    pub micro_tasks: Vec<ExecutableTask>,
-    /// Timestamp of the update
-    pub updated_at: u64,
-    /// Signature from participants (for verification)
-    pub signature: Bytes,
-}
-
-/// State channel settlement record
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StateChannelSettlement {
-    /// Channel ID
-    pub channel_id: u64,
-    /// Settlement ID
-    pub settlement_id: u64,
-    /// Nonce used for this settlement
-    pub nonce: u64,
-    /// Timestamp of settlement
-    pub settled_at: u64,
-    /// Tasks executed during settlement
-    pub executed_tasks: Vec<u64>,
-    /// Settlement fee paid
-    pub settlement_fee: i128,
-}
-
-/// Role enumeration for granular access control
-#[contracttype]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Role {
-    Admin,
-    Keeper,
-    Delegate,
-    Viewer,
-    Auditor,
-}
-
-/// Permission enumeration for fine-grained access control
-#[contracttype]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Permission {
-    TaskCreate,
-    TaskExecute,
-    TaskManage,
-    PortfolioManage,
-    GovernanceVote,
-    GovernancePropose,
-    KeeperRegister,
-    KeeperDelegated,
-    AdminAccess,
-}
-
-/// Role assignment for an address
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct RoleAssignment {
-    /// Address that has been assigned a role
-    pub address: Address,
-    /// The role assigned to this address
-    pub role: Role,
-    /// Timestamp when the role was assigned
-    pub assigned_at: u64,
-    /// Optional expiration timestamp (0 for no expiration)
-    pub expires_at: u64,
-}
-
-/// Permission grant for specific permissions
-
-/// Helper to verify that the caller has the required role or permission
-/// Returns true if the caller is authorized, otherwise panics with Error::Unauthorized.
-fn is_authorized(env: &Env, required_role: Role) {
-    // Get caller address (in Soroban contracts the caller is the address invoking the contract)
-    let caller = env.invoker();
-    // Fetch role assignment if present
-    if let Some(assignment) = get_role_assignment(env, &caller) {
-        if assignment.role == required_role {
-            return;
-        }
-    }
-    // Fetch permission grant and check for AdminAccess permission
-    if let Some(grant) = get_permission_grant(env, &caller) {
-        if grant.permissions.iter().any(|p| *p == Permission::AdminAccess) {
-            return;
-        }
-    }
-    panic_with_error!(env, Error::Unauthorized);
-}
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct PermissionGrant {
-    /// Address that has been granted permissions
-    pub address: Address,
-    /// List of permissions granted
-    pub permissions: Vec<Permission>,
-    /// Timestamp when permissions were granted
-    pub granted_at: u64,
-    /// Optional expiration timestamp (0 for no expiration)
-    pub expires_at: u64,
-}
-
-/// Delegation record for permission delegation
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Delegation {
-    /// Address that delegated permissions
-    pub delegator: Address,
-    /// Address that received delegated permissions
-    pub delegatee: Address,
-    /// List of permissions delegated
-    pub permissions: Vec<Permission>,
-    /// Timestamp when delegation was created
-    pub created_at: u64,
-    /// Expiration timestamp for delegation
-    pub expires_at: u64,
-    /// Whether delegation is revocable
-    pub is_revocable: bool,
-}
-
-/// Merkle proof for task condition verification
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct MerkleProof {
-    /// Task ID this Merkle proof applies to
-    pub task_id: u64,
-    /// Root hash of the Merkle tree
-    pub root_hash: Bytes,
-    /// Merkle proof data (sibling hashes)
-    pub proof: Vec<Bytes>,
-    /// Leaf index in the Merkle tree
-    pub leaf_index: u64,
-    /// Verifier address that can verify this proof
-    pub verifier_address: Address,
-    /// Created timestamp
-    pub created_at: u64,
-    /// Whether the proof has been verified
-    pub is_verified: bool,
-}
-
 #[contracttype]
 #[derive(Clone, Debug)]
 /// Configuration for yield harvesting strategies
@@ -387,8 +207,8 @@ pub struct StakingBalance {
 #[derive(Clone, Debug)]
 pub struct GovernanceProposal {
     pub proposer: Address,
-    pub title: Bytes,
-    pub description: Bytes,
+    pub title: Vec<u8>,
+    pub description: Vec<u8>,
     pub created_at: u64,
     pub expires_at: u64,
     pub status: ProposalStatus,
@@ -486,124 +306,48 @@ pub enum VrfRequestStatus {
 pub struct VrfResponse {
     pub request_id: u64,
     pub random_number: i128,
-    pub proof: Bytes,
+    pub proof: Vec<u8>,
     pub fulfilled_at: u64,
 }
 
 #[contracttype]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum OracleProvider {
-    Chainlink,
-    Band,
-    Custom,
-}
-
-#[contracttype]
 #[derive(Clone, Debug)]
-pub struct OracleConfig {
-    pub address: Address,
-    pub provider: OracleProvider,
-    pub active: bool,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct OracleDataRequest {
+pub struct VrfRequest {
     pub request_id: u64,
     pub task_id: u64,
     pub requester: Address,
-    pub provider: OracleProvider,
-    pub job_id: Symbol,
     pub callback_function: Symbol,
     pub callback_args: Vec<Val>,
-    pub status: OracleRequestStatus,
+    pub status: VrfRequestStatus,
     pub created_at: u64,
-    pub max_retries: u32,
-    pub retry_count: u32,
 }
 
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum OracleRequestStatus {
+pub enum VrfRequestStatus {
     Pending,
     Fulfilled,
     Failed,
-    Timeout,
 }
 
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct OracleDataResponse {
+pub struct VrfResponse {
     pub request_id: u64,
-    pub data: Bytes,
-    pub timestamp: u64,
-    pub provider: OracleProvider,
+    pub random_number: i128,
+    pub proof: Vec<u8>,
+    pub fulfilled_at: u64,
 }
 
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ZkCondition {
     pub task_id: u64,
-    pub condition_hash: Bytes,
-    pub zk_proof: Bytes,
+    pub condition_hash: Vec<u8>,
+    pub zk_proof: Vec<u8>,
     pub verifier_address: Address,
     pub created_at: u64,
     pub is_verified: bool,
-}
-
-/// Keeper reputation tracking structure
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct KeeperReputation {
-    /// Address of the keeper
-    pub address: Address,
-    /// Current reputation score (0-1000 scale)
-    pub score: u64,
-    /// Total number of task executions attempted
-    pub execution_count: u64,
-    /// Number of successful task executions
-    pub success_count: u64,
-    /// Number of failed task executions
-    pub failure_count: u64,
-    /// Timestamp of last reputation update
-    pub last_updated: u64,
-    /// Optional notes about reputation history
-    pub notes: Bytes,
-}
-
-/// Keeper reputation history record
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct KeeperReputationHistory {
-    /// Address of the keeper
-    pub address: Address,
-    /// Reputation score at this point in time
-    pub score: u64,
-    /// Timestamp of this reputation snapshot
-    pub timestamp: u64,
-    /// Reason for reputation change
-    pub reason: Bytes,
-    /// Previous score before change
-    pub previous_score: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProxyConfig {
-    pub admin: Address,
-    pub version: u32,
-    pub implementation_hash: Option<BytesN<32>>,
-    pub upgrade_count: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeRecord {
-    pub previous_version: u32,
-    pub new_version: u32,
-    pub implementation_hash: BytesN<32>,
-    pub upgraded_by: Address,
-    pub upgraded_at: u64,
 }
 
 #[contracttype]
@@ -628,10 +372,6 @@ pub enum DataKey {
     VrfRequestCounter,
     VrfRequests(u64),
     VrfResponses(u64),
-    OracleConfig(OracleProvider),
-    OracleRequestCounter,
-    OracleRequests(u64),
-    OracleResponses(u64),
     YieldStrategyCounter,
     YieldStrategies(u64),
     ReentrancyLock,
@@ -640,25 +380,6 @@ pub enum DataKey {
     NetworkMetrics,
     KeeperMetrics,
     AdminAddress,
-    StateChannel(u64),
-    StateChannelCounter,
-    StateChannelUpdates(u64),
-    StateChannelUpdateCounter,
-    StateChannelSettlements(u64),
-    StateChannelSettlementCounter,
-    MerkleProofs(u64),
-    MerkleProofCounter,
-    RoleAssignments(Address),
-    PermissionGrants(Address),
-    Delegations(Address),
-    RoleAssignmentCounter,
-    PermissionGrantCounter,
-    DelegationCounter,
-    KeeperReputation(Address),
-    KeeperReputationHistory(Address),
-    KeeperReputationCounter,
-    ProxyConfig,
-    UpgradeRecord(u64),
 }
 
 fn get_active_task_ids(env: &Env) -> Vec<u64> {
@@ -1138,15 +859,15 @@ impl SoroTaskContract {
         callback_args: Vec<Val>,
     ) {
         enter_security_guard(&env);
-
+        
         // Check if VRF oracle is configured
-        let _oracle_address: Address = env
+        let oracle_address: Address = env
             .storage()
             .instance()
             .get(&DataKey::VrfOracleAddress)
             .ok_or(Error::VrfOracleNotSet)
             .expect("VRF oracle address not set");
-
+        
         let task_key = DataKey::Task(task_id);
         let config: TaskConfig = env
             .storage()
@@ -1154,17 +875,20 @@ impl SoroTaskContract {
             .get(&task_key)
             .ok_or(Error::TaskNotFound)
             .expect("Task not found");
-
+        
         // Only task creator can request VRF randomness
         config.creator.require_auth();
-
-        // Callback function must be a valid Symbol (length > 0 handled by SDK)
-
+        
+        // Validate callback function
+        if callback_function.to_string().is_empty() {
+            panic_with_error!(&env, Error::InvalidVrfRequest);
+        }
+        
         // Validate callback arguments size
         if callback_args.len() > MAX_ARGS_COUNT {
             panic_with_error!(&env, Error::ArgsTooMany);
         }
-
+        
         // Get current request counter and increment
         let mut request_counter: u64 = env
             .storage()
@@ -1172,10 +896,8 @@ impl SoroTaskContract {
             .get(&DataKey::VrfRequestCounter)
             .unwrap_or(0);
         request_counter += 1;
-        env.storage()
-            .instance()
-            .set(&DataKey::VrfRequestCounter, &request_counter);
-
+        env.storage().instance().set(&DataKey::VrfRequestCounter, &request_counter);
+        
         // Create VRF request
         let vrf_request = VrfRequest {
             request_id: request_counter,
@@ -1186,11 +908,9 @@ impl SoroTaskContract {
             status: VrfRequestStatus::Pending,
             created_at: env.ledger().timestamp(),
         };
-
+        
         // Store VRF request
-        env.storage()
-            .persistent()
-            .set(&DataKey::VrfRequests(request_counter), &vrf_request);
+        env.storage().persistent().set(&DataKey::VrfRequests(request_counter), &vrf_request);
         
         // Emit VrfRequestCreated event
         env.events().publish(
@@ -1201,174 +921,107 @@ impl SoroTaskContract {
             ),
             (task_id, config.creator.clone()),
         );
-
+        
         exit_security_guard(&env);
-    }
 
-    /// Sets the configuration for a specific Oracle provider.
-    pub fn set_oracle_config(
-        env: Env,
-        provider: OracleProvider,
-        oracle_address: Address,
-        active: bool,
-    ) {
-        enter_security_guard(&env);
-
-        let config = OracleConfig {
-            address: oracle_address.clone(),
-            provider: provider.clone(),
-            active,
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::OracleConfig(provider.clone()), &config);
-
-        env.events().publish(
-            (Symbol::new(&env, "OracleConfigSet"), provider),
-            oracle_address,
-        );
-        exit_security_guard(&env);
-    }
-
-    /// Requests external data from a Decentralized Oracle Network.
-    pub fn request_oracle_data(
+    /// Requests randomness from the VRF oracle for a task.
+    /// The oracle will call back with the random number when ready.
+    pub fn request_vrf_randomness(
         env: Env,
         task_id: u64,
-        provider: OracleProvider,
-        job_id: Symbol,
         callback_function: Symbol,
         callback_args: Vec<Val>,
     ) {
         enter_security_guard(&env);
-
-        let config: OracleConfig = env
+        
+        // Check if VRF oracle is configured
+        let oracle_address: Address = env
             .storage()
             .instance()
-            .get(&DataKey::OracleConfig(provider.clone()))
-            .ok_or(Error::OracleNotSet)
-            .expect("Oracle provider not configured");
-
-        if !config.active {
-            panic_with_error!(&env, Error::OracleNotSet);
-        }
-
+            .get(&DataKey::VrfOracleAddress)
+            .ok_or(Error::VrfOracleNotSet)
+            .expect("VRF oracle address not set");
+        
         let task_key = DataKey::Task(task_id);
-        let task: TaskConfig = env
+        let config: TaskConfig = env
             .storage()
             .persistent()
             .get(&task_key)
             .ok_or(Error::TaskNotFound)
             .expect("Task not found");
-
-        task.creator.require_auth();
-
+        
+        // Only task creator can request VRF randomness
+        config.creator.require_auth();
+        
+        // Validate callback function
+        if callback_function.to_string().is_empty() {
+            panic_with_error!(&env, Error::InvalidVrfRequest);
+        }
+        
+        // Validate callback arguments size
+        if callback_args.len() > MAX_ARGS_COUNT {
+            panic_with_error!(&env, Error::ArgsTooMany);
+        }
+        
+        // Get current request counter and increment
         let mut request_counter: u64 = env
             .storage()
             .instance()
-            .get(&DataKey::OracleRequestCounter)
+            .get(&DataKey::VrfRequestCounter)
             .unwrap_or(0);
         request_counter += 1;
-        env.storage()
-            .instance()
-            .set(&DataKey::OracleRequestCounter, &request_counter);
-
-        let request = OracleDataRequest {
+        env.storage().instance().set(&DataKey::VrfRequestCounter, &request_counter);
+        
+        // Create VRF request
+        let vrf_request = VrfRequest {
             request_id: request_counter,
             task_id,
-            requester: task.creator.clone(),
-            provider: provider.clone(),
-            job_id: job_id.clone(),
+            requester: config.creator.clone(),
             callback_function,
             callback_args,
-            status: OracleRequestStatus::Pending,
+            status: VrfRequestStatus::Pending,
             created_at: env.ledger().timestamp(),
-            max_retries: 3,
-            retry_count: 0,
         };
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::OracleRequests(request_counter), &request);
-
+        
+        // Store VRF request
+        env.storage().persistent().set(&DataKey::VrfRequests(request_counter), &vrf_request);
+        
+        // Emit VrfRequestCreated event
         env.events().publish(
             (
-                Symbol::new(&env, "OracleDataRequested"),
-                provider,
+                Symbol::new(&env, "VrfRequestCreated"),
+                Symbol::new(&env, "v1"),
                 request_counter,
             ),
-            (task_id, job_id),
+            (task_id, config.creator.clone()),
         );
-
-        exit_security_guard(&env);
-    }
-
-    /// Fulfill an oracle request with data. Called by the Oracle provider contract.
-    pub fn fulfill_oracle_data(env: Env, caller: Address, request_id: u64, data: Bytes) {
-        enter_security_guard(&env);
-        caller.require_auth();
-
-        let mut request: OracleDataRequest = env
-            .storage()
-            .persistent()
-            .get(&DataKey::OracleRequests(request_id))
-            .expect("Oracle request not found");
-
-        if request.status != OracleRequestStatus::Pending {
-            panic_with_error!(&env, Error::OracleInvalidResponse);
-        }
-
-        let config: OracleConfig = env
-            .storage()
-            .instance()
-            .get(&DataKey::OracleConfig(request.provider.clone()))
-            .expect("Oracle config not found");
-
-        if caller != config.address {
-            panic_with_error!(&env, Error::Unauthorized);
-        }
-
-        request.status = OracleRequestStatus::Fulfilled;
-        env.storage()
-            .persistent()
-            .set(&DataKey::OracleRequests(request_id), &request);
-
-        let response = OracleDataResponse {
-            request_id,
-            data: data.clone(),
-            timestamp: env.ledger().timestamp(),
-            provider: request.provider.clone(),
-        };
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::OracleResponses(request_id), &response);
-
-        env.events().publish(
-            (Symbol::new(&env, "OracleDataFulfilled"), request.provider),
-            request_id,
-        );
-
+        
         exit_security_guard(&env);
     }
 
     /// Fulfill a VRF request with a random number.
     /// Called by the VRF oracle contract.
-    pub fn fulfill_vrf_request(env: Env, request_id: u64, random_number: i128, proof: Bytes) {
+    pub fn fulfill_vrf_request(
+        env: Env,
+        request_id: u64,
+        random_number: i128,
+        proof: Vec<u8>,
+    ) {
         enter_security_guard(&env);
-
+        
         // Check if VRF oracle is configured
         let oracle_address: Address = env
             .storage()
             .instance()
             .get(&DataKey::VrfOracleAddress)
             .expect("VRF oracle address not set");
-
+        
         // Only the VRF oracle can fulfill requests
-        let caller = env.current_contract_address();
+        let caller = Address::current(&env);
         if caller != oracle_address {
             panic_with_error!(&env, Error::Unauthorized);
         }
-
+        
         // Get the VRF request
         let vrf_request: VrfRequest = env
             .storage()
@@ -1376,17 +1029,17 @@ impl SoroTaskContract {
             .get(&DataKey::VrfRequests(request_id))
             .ok_or(Error::VrfRequestFailed)
             .expect("VRF request not found");
-
+        
         // Check if request is pending
         if vrf_request.status != VrfRequestStatus::Pending {
             panic_with_error!(&env, Error::VrfAlreadyFulfilled);
         }
-
+        
         // Validate random number
         if random_number < 0 {
             panic_with_error!(&env, Error::VrfRequestFailed);
         }
-
+        
         // Validate proof
         if proof.len() == 0 {
             panic_with_error!(&env, Error::VrfRequestFailed);
@@ -1394,7 +1047,7 @@ impl SoroTaskContract {
         if proof.len() > 1024 {
             panic_with_error!(&env, Error::VrfRequestFailed);
         }
-
+        
         // Create VRF response
         let vrf_response = VrfResponse {
             request_id,
@@ -1402,19 +1055,15 @@ impl SoroTaskContract {
             proof,
             fulfilled_at: env.ledger().timestamp(),
         };
-
+        
         // Update request status to fulfilled
         let mut updated_request = vrf_request.clone();
         updated_request.status = VrfRequestStatus::Fulfilled;
-        env.storage()
-            .persistent()
-            .set(&DataKey::VrfRequests(request_id), &updated_request);
-
+        env.storage().persistent().set(&DataKey::VrfRequests(request_id), &updated_request);
+        
         // Store VRF response
-        env.storage()
-            .persistent()
-            .set(&DataKey::VrfResponses(request_id), &vrf_response);
-
+        env.storage().persistent().set(&DataKey::VrfResponses(request_id), &vrf_response);
+        
         // Emit VrfRequestFulfilled event
         env.events().publish(
             (
@@ -1424,7 +1073,7 @@ impl SoroTaskContract {
             ),
             (vrf_request.task_id, random_number),
         );
-
+        
         exit_security_guard(&env);
     }
 
@@ -1461,9 +1110,9 @@ impl SoroTaskContract {
 
     /// Creates a new portfolio.
     /// Returns the unique sequential ID of the created portfolio.
-    pub fn create_portfolio(env: Env, name: Bytes, description: Bytes) -> u64 {
+    pub fn create_portfolio(env: Env, name: Vec<u8>, description: Vec<u8>) -> u64 {
         enter_security_guard(&env);
-        let creator = env.current_contract_address();
+        let creator = Address::current(&env);
 
         // Generate a unique sequential ID
         let mut counter: u64 = env
@@ -1472,9 +1121,7 @@ impl SoroTaskContract {
             .get(&DataKey::PortfolioCounter)
             .unwrap_or(0);
         counter += 1;
-        env.storage()
-            .persistent()
-            .set(&DataKey::PortfolioCounter, &counter);
+        env.storage().persistent().set(&DataKey::PortfolioCounter, &counter);
 
         let portfolio = Portfolio {
             creator: creator.clone(),
@@ -1543,9 +1190,7 @@ impl SoroTaskContract {
         if !already_exists {
             portfolio_tasks.push_back(task_id);
             portfolio.task_count += 1;
-            env.storage()
-                .persistent()
-                .set(&DataKey::PortfolioTasks(portfolio_id), &portfolio_tasks);
+            env.storage().persistent().set(&DataKey::PortfolioTasks(portfolio_id), &portfolio_tasks);
             env.storage().persistent().set(&portfolio_key, &portfolio);
         }
 
@@ -1591,9 +1236,7 @@ impl SoroTaskContract {
 
         if new_portfolio_tasks.len() < portfolio_tasks.len() {
             portfolio.task_count -= 1;
-            env.storage()
-                .persistent()
-                .set(&DataKey::PortfolioTasks(portfolio_id), &new_portfolio_tasks);
+            env.storage().persistent().set(&DataKey::PortfolioTasks(portfolio_id), &new_portfolio_tasks);
             env.storage().persistent().set(&portfolio_key, &portfolio);
         }
 
@@ -1628,41 +1271,19 @@ impl SoroTaskContract {
     pub fn pause_portfolio(env: Env, portfolio_id: u64) {
         enter_security_guard(&env);
         let portfolio_key = DataKey::Portfolio(portfolio_id);
-        let portfolio: Portfolio = env
+        let mut portfolio: Portfolio = env
             .storage()
             .persistent()
             .get(&portfolio_key)
             .expect("Portfolio not found");
 
-        require_admin(&env);
+        portfolio.creator.require_auth();
 
         let portfolio_tasks = Self::get_portfolio_tasks(env.clone(), portfolio_id);
 
         for i in 0..portfolio_tasks.len() {
             let task_id = portfolio_tasks.get(i).unwrap();
-            let task_key = DataKey::Task(task_id);
-            let mut config: TaskConfig = env
-                .storage()
-                .persistent()
-                .get(&task_key)
-                .expect("Task not found");
-
-            if !config.is_active {
-                panic_with_error!(&env, Error::TaskAlreadyPaused);
-            }
-
-            config.is_active = false;
-            env.storage().persistent().set(&task_key, &config);
-            remove_active_task_id(&env, task_id);
-
-            env.events().publish(
-                (
-                    Symbol::new(&env, "TaskPaused"),
-                    Symbol::new(&env, "v1"),
-                    task_id,
-                ),
-                config.creator.clone(),
-            );
+            Self::pause_task(env.clone(), task_id);
         }
 
         // Emit PortfolioPaused event
@@ -1681,7 +1302,7 @@ impl SoroTaskContract {
     pub fn resume_portfolio(env: Env, portfolio_id: u64) {
         enter_security_guard(&env);
         let portfolio_key = DataKey::Portfolio(portfolio_id);
-        let portfolio: Portfolio = env
+        let mut portfolio: Portfolio = env
             .storage()
             .persistent()
             .get(&portfolio_key)
@@ -1693,29 +1314,7 @@ impl SoroTaskContract {
 
         for i in 0..portfolio_tasks.len() {
             let task_id = portfolio_tasks.get(i).unwrap();
-            let task_key = DataKey::Task(task_id);
-            let mut config: TaskConfig = env
-                .storage()
-                .persistent()
-                .get(&task_key)
-                .expect("Task not found");
-
-            if config.is_active {
-                panic_with_error!(&env, Error::TaskAlreadyActive);
-            }
-
-            config.is_active = true;
-            env.storage().persistent().set(&task_key, &config);
-            add_active_task_id(&env, task_id);
-
-            env.events().publish(
-                (
-                    Symbol::new(&env, "TaskResumed"),
-                    Symbol::new(&env, "v1"),
-                    task_id,
-                ),
-                config.creator.clone(),
-            );
+            Self::resume_task(env.clone(), task_id);
         }
 
         // Emit PortfolioResumed event
@@ -1734,7 +1333,7 @@ impl SoroTaskContract {
     pub fn fund_portfolio(env: Env, portfolio_id: u64, amount: i128) {
         enter_security_guard(&env);
         let portfolio_key = DataKey::Portfolio(portfolio_id);
-        let portfolio: Portfolio = env
+        let mut portfolio: Portfolio = env
             .storage()
             .persistent()
             .get(&portfolio_key)
@@ -1743,35 +1342,10 @@ impl SoroTaskContract {
         portfolio.creator.require_auth();
 
         let portfolio_tasks = Self::get_portfolio_tasks(env.clone(), portfolio_id);
-        let token_address: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Token)
-            .expect("Not initialized");
-        let token_client = soroban_sdk::token::Client::new(&env, &token_address);
 
         for i in 0..portfolio_tasks.len() {
             let task_id = portfolio_tasks.get(i).unwrap();
-            let task_key = DataKey::Task(task_id);
-            let mut config: TaskConfig = env
-                .storage()
-                .persistent()
-                .get(&task_key)
-                .expect("Task not found");
-
-            token_client.transfer(&portfolio.creator, &env.current_contract_address(), &amount);
-
-            config.gas_balance += amount;
-            env.storage().persistent().set(&task_key, &config);
-
-            env.events().publish(
-                (
-                    Symbol::new(&env, "GasDeposited"),
-                    Symbol::new(&env, "v1"),
-                    task_id,
-                ),
-                (portfolio.creator.clone(), amount),
-            );
+            Self::deposit_gas(env.clone(), task_id, portfolio.creator.clone(), amount);
         }
 
         // Emit PortfolioFunded event
@@ -1791,16 +1365,16 @@ impl SoroTaskContract {
     pub fn execute_portfolio_tasks(env: Env, portfolio_id: u64) {
         enter_security_guard(&env);
         let portfolio_key = DataKey::Portfolio(portfolio_id);
-        let portfolio: Portfolio = env
+        let mut portfolio: Portfolio = env
             .storage()
             .persistent()
             .get(&portfolio_key)
             .expect("Portfolio not found");
-
+        
         portfolio.creator.require_auth();
-
+        
         let portfolio_tasks = Self::get_portfolio_tasks(env.clone(), portfolio_id);
-
+        
         for i in 0..portfolio_tasks.len() {
             let task_id = portfolio_tasks.get(i).unwrap();
             // Execute each task in the portfolio
@@ -1809,7 +1383,7 @@ impl SoroTaskContract {
             let keeper_address = portfolio.creator.clone();
             Self::execute(env.clone(), keeper_address, task_id);
         }
-
+        
         // Emit PortfolioTasksExecuted event
         env.events().publish(
             (
@@ -1819,22 +1393,22 @@ impl SoroTaskContract {
             ),
             (portfolio_tasks.len(), portfolio.creator.clone()),
         );
-
+        
         exit_security_guard(&env);
     }
 
     /// Executes multiple tasks in a single transaction for gas optimization.
     /// Allows keepers to execute a batch of tasks efficiently.
-    ///
+    /// 
     /// # Safety & Atomicity
     /// Soroban transactions are fully atomic. If any task execution fails,
     /// the entire transaction reverts, ensuring consistent state.
-    ///
+    /// 
     /// # Parameters
     /// - `env`: The Soroban environment
     /// - `keeper`: The address of the keeper executing the tasks
     /// - `task_ids`: Vector of task IDs to execute
-    ///
+    /// 
     /// # Errors
     /// - `Error::Unauthorized`: If the keeper is not authorized for any task
     /// - `Error::TaskNotFound`: If any task ID does not exist
@@ -1844,26 +1418,26 @@ impl SoroTaskContract {
     pub fn batch_execute(env: Env, keeper: Address, task_ids: Vec<u64>) {
         enter_security_guard(&env);
         keeper.require_auth();
-
+        
         // Validate that we have some tasks to execute
         if task_ids.is_empty() {
             panic_with_error!(&env, Error::InvalidInterval);
         }
-
+        
         // Validate batch size limit
         if task_ids.len() > MAX_BATCH_SIZE as u32 {
             panic_with_error!(&env, Error::InvalidInterval);
         }
-
+        
         // Process each task in the batch
         for i in 0..task_ids.len() {
             let task_id = task_ids.get(i).unwrap();
-
+            
             // Use the existing execute logic for each task
             // This ensures consistency with single-task execution
-            Self::execute(env.clone(), keeper.clone(), task_id);
+            Self::execute(env.clone(), keeper.clone(), *task_id);
         }
-
+        
         // Emit BatchExecutionCompleted event
         env.events().publish(
             (
@@ -1873,251 +1447,7 @@ impl SoroTaskContract {
             ),
             (task_ids.len(), task_ids),
         );
-
-        exit_security_guard(&env);
-    }
-
-    /// Opens a new state channel for micro-task execution.
-    ///
-    /// # Parameters
-    /// - `env`: The Soroban environment
-    /// - `participants`: List of addresses that can participate in this channel
-    /// - `settlement_interval`: Time interval (in seconds) after which the channel must be settled
-    /// - `initial_balances`: Initial balances for each participant
-    ///
-    /// # Returns
-    /// - The unique sequential ID of the created state channel
-    pub fn open_state_channel(
-        env: Env,
-        participants: Vec<Address>,
-        settlement_interval: u64,
-        initial_balances: Vec<i128>,
-    ) -> u64 {
-        enter_security_guard(&env);
-
-        // Validate participants and balances
-        if participants.len() == 0 {
-            panic_with_error!(&env, Error::InvalidInterval);
-        }
-
-        if participants.len() != initial_balances.len() {
-            panic_with_error!(&env, Error::InvalidInterval);
-        }
-
-        // Generate a unique sequential ID
-        let mut counter: u64 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::StateChannelCounter)
-            .unwrap_or(0);
-        counter += 1;
-        env.storage()
-            .persistent()
-            .set(&DataKey::StateChannelCounter, &counter);
-
-        // Create state channel
-        let channel = StateChannel {
-            channel_id: counter,
-            participants,
-            balances: initial_balances,
-            last_settlement: 0,
-            settlement_interval,
-            is_active: true,
-            nonce: 0,
-        };
-
-        // Store state channel
-        env.storage()
-            .persistent()
-            .set(&DataKey::StateChannel(counter), &channel);
-
-        // Emit StateChannelOpened event
-        env.events().publish(
-            (
-                Symbol::new(&env, "StateChannelOpened"),
-                Symbol::new(&env, "v1"),
-                counter,
-            ),
-            (),
-        );
-
-        exit_security_guard(&env);
-        counter
-    }
-
-    /// Updates a state channel with off-chain computation results.
-    /// This does not execute tasks yet, just stores the update hash and metadata.
-    ///
-    /// # Parameters
-    /// - `env`: The Soroban environment
-    /// - `channel_id`: The ID of the state channel to update
-    /// - `state_hash`: Hash of the updated state
-    /// - `micro_tasks`: Micro-tasks to execute as part of this settlement
-    /// - `signature`: Signature from participants for verification
-    pub fn update_state_channel(
-        env: Env,
-        channel_id: u64,
-        state_hash: Bytes,
-        micro_tasks: Vec<ExecutableTask>,
-        signature: Bytes,
-    ) {
-        enter_security_guard(&env);
-
-        // Validate channel exists
-        let channel: StateChannel = env
-            .storage()
-            .persistent()
-            .get(&DataKey::StateChannel(channel_id))
-            .expect("State channel not found");
-
-        // Only participants can update the channel
-        let caller = env.current_contract_address();
-        let mut is_participant = false;
-        for i in 0..channel.participants.len() {
-            if channel.participants.get(i).unwrap() == caller {
-                is_participant = true;
-                break;
-            }
-        }
-        if !is_participant {
-            panic_with_error!(&env, Error::Unauthorized);
-        }
-
-        // Validate nonce increment
-        let mut update_counter: u64 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::StateChannelUpdateCounter)
-            .unwrap_or(0);
-        update_counter += 1;
-
-        // Create state channel update
-        let update = StateChannelUpdate {
-            channel_id,
-            nonce: update_counter,
-            state_hash,
-            micro_tasks,
-            updated_at: env.ledger().timestamp(),
-            signature,
-        };
-
-        // Store state channel update
-        env.storage()
-            .persistent()
-            .set(&DataKey::StateChannelUpdates(update_counter), &update);
-
-        // Update channel nonce
-        let mut updated_channel = channel.clone();
-        updated_channel.nonce = update_counter;
-        env.storage()
-            .persistent()
-            .set(&DataKey::StateChannel(channel_id), &updated_channel);
-
-        // Emit StateChannelUpdated event
-        env.events().publish(
-            (
-                Symbol::new(&env, "StateChannelUpdated"),
-                Symbol::new(&env, "v1"),
-                channel_id,
-            ),
-            (update_counter, env.ledger().timestamp()),
-        );
-
-        exit_security_guard(&env);
-    }
-
-    /// Settles a state channel on-chain, executing micro-tasks and updating balances.
-    /// This is the final step that moves off-chain computations to on-chain state.
-    ///
-    /// # Parameters
-    /// - `env`: The Soroban environment
-    /// - `channel_id`: The ID of the state channel to settle
-    /// - `update_id`: The ID of the state channel update to settle
-    /// - `keeper`: The address of the keeper executing the settlement
-    pub fn settle_state_channel(env: Env, channel_id: u64, update_id: u64, keeper: Address) {
-        enter_security_guard(&env);
-
-        // Validate channel exists
-        let channel: StateChannel = env
-            .storage()
-            .persistent()
-            .get(&DataKey::StateChannel(channel_id))
-            .expect("State channel not found");
-
-        // Validate update exists
-        let update: StateChannelUpdate = env
-            .storage()
-            .persistent()
-            .get(&DataKey::StateChannelUpdates(update_id))
-            .expect("State channel update not found");
-
-        // Verify update belongs to this channel
-        if update.channel_id != channel_id {
-            panic_with_error!(&env, Error::InvalidInterval);
-        }
-
-        // Only keeper can settle the channel
-        keeper.require_auth();
-
-        // Validate settlement interval has passed
-        let now = env.ledger().timestamp();
-        if now < channel.last_settlement + channel.settlement_interval {
-            panic_with_error!(&env, Error::InvalidInterval);
-        }
-
-        // Generate settlement ID
-        let mut settlement_counter: u64 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::StateChannelSettlementCounter)
-            .unwrap_or(0);
-        settlement_counter += 1;
-
-        // Execute micro-tasks
-        let mut executed_task_ids = Vec::new(&env);
-        for task in update.micro_tasks.iter() {
-            // Execute each micro-task
-            // In production, this would use the keeper's address and proper fee handling
-            env.invoke_contract::<Val>(&task.target, &task.function, task.args.clone());
-            executed_task_ids.push_back(task.task_id);
-        }
-
-        // Calculate settlement fee
-        let settlement_fee = FIXED_EXECUTION_FEE * (executed_task_ids.len() as i128);
-
-        // Create settlement record
-        let settlement = StateChannelSettlement {
-            channel_id,
-            settlement_id: settlement_counter,
-            nonce: update.nonce,
-            settled_at: now,
-            executed_tasks: executed_task_ids.clone(),
-            settlement_fee,
-        };
-
-        // Store settlement
-        env.storage().persistent().set(
-            &DataKey::StateChannelSettlements(settlement_counter),
-            &settlement,
-        );
-
-        // Update channel last settlement timestamp
-        let mut updated_channel = channel.clone();
-        updated_channel.last_settlement = now;
-        env.storage()
-            .persistent()
-            .set(&DataKey::StateChannel(channel_id), &updated_channel);
-
-        // Emit StateChannelSettled event
-        env.events().publish(
-            (
-                Symbol::new(&env, "StateChannelSettled"),
-                Symbol::new(&env, "v1"),
-                channel_id,
-            ),
-            (settlement_counter, executed_task_ids.len(), settlement_fee),
-        );
-
+        
         exit_security_guard(&env);
     }
 
@@ -2258,41 +1588,30 @@ impl SoroTaskContract {
         // The VRF response interface is:  check_vrf_condition(random_number: i128) -> bool
         let should_execute_vrf = {
             // Check if there are any pending VRF requests for this task
+            let mut vrf_request_found = false;
             let mut vrf_response_found = false;
-
+            let mut vrf_response: Option<VrfResponse> = None;
+            
             // Look for VRF requests for this task
             // We'll use a simple approach: check request counter and iterate through requests
             // In production, this would be optimized with proper indexing
             if env.storage().instance().has(&DataKey::VrfRequestCounter) {
-                let request_counter: u64 = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::VrfRequestCounter)
-                    .unwrap();
+                let request_counter: u64 = env.storage().instance().get(&DataKey::VrfRequestCounter).unwrap();
                 for i in 1..=request_counter {
-                    if let Some(vrf_request) = env
-                        .storage()
-                        .persistent()
-                        .get::<DataKey, VrfRequest>(&DataKey::VrfRequests(i))
-                    {
-                        if vrf_request.task_id == task_id
-                            && vrf_request.status == VrfRequestStatus::Fulfilled
-                        {
+                    if let Ok(vrf_request) = env.storage().persistent().get::<DataKey, VrfRequest>(&DataKey::VrfRequests(i)) {
+                        if vrf_request.task_id == task_id && vrf_request.status == VrfRequestStatus::Fulfilled {
+                            vrf_request_found = true;
                             // Check if response exists
-                            if env
-                                .storage()
-                                .persistent()
-                                .get::<DataKey, VrfResponse>(&DataKey::VrfResponses(i))
-                                .is_some()
-                            {
+                            if let Ok(response) = env.storage().persistent().get::<DataKey, VrfResponse>(&DataKey::VrfResponses(i)) {
                                 vrf_response_found = true;
+                                vrf_response = Some(response);
                                 break;
                             }
                         }
                     }
                 }
             }
-
+            
             if vrf_response_found {
                 // Call VRF condition checker if configured
                 // For now, we'll use a simple default: always execute if VRF response exists
@@ -2319,41 +1638,11 @@ impl SoroTaskContract {
             }
         };
 
-        // ── State channel condition gate ────────────────────────────────────────────────────
-        // When state channel updates are present for this task, we check if the task
-        // is part of a state channel settlement before executing.
-        // This allows off-chain state channels to settle micro-task executions on-chain.
-        let should_execute_state_channel = {
-            // Check if task is part of any state channel settlement
-            // In production, this would check for pending state channel updates
-            // that include this task ID in their micro_tasks list
-            false
-        };
-
-        // ── Merkle proof condition gate ────────────────────────────────────────────────────
-        // When Merkle proofs are present for this task, we check if the Merkle proof
-        // has been verified before executing.
-        // This allows secure linking of off-chain data to on-chain execution via Merkle trees.
-        let should_execute_merkle_proof = {
-            // Check if Merkle proof is satisfied for this task
-            if Self::is_merkle_proof_satisfied(env.clone(), task_id) {
-                // If Merkle proof is satisfied, use it
-                true
-            } else {
-                // If no Merkle proof is satisfied, use state channel result
-                should_execute_state_channel
-            }
-        };
-
-        // Determine final execution decision based on all condition gates
-        let should_execute =
-            should_execute_merkle_proof || should_execute_state_channel || should_execute_zk;
-
-        if should_execute {
+        if should_execute_zk {
             // ── Fee validation & calculation ──────────────────────────────
             // Calculate fee based on task complexity and configuration
             let fee: i128 = Self::calculate_execution_fee(&env, &config);
-
+            
             // Validate sufficient balance
             if config.gas_balance < fee {
                 panic_with_error!(&env, Error::InsufficientBalance);
@@ -2361,8 +1650,7 @@ impl SoroTaskContract {
 
             // ── Yield strategy execution ──────────────────────────────────────
             // If task is configured with a yield strategy, execute it instead of cross-contract call
-            let executed_yield_strategy = if let Some(ref yield_strategy_id) = config.yield_strategy
-            {
+            let executed_yield_strategy = if let Some(ref yield_strategy_id) = config.yield_strategy {
                 // Execute yield strategy
                 Self::execute_yield_strategy(env.clone(), *yield_strategy_id, task_id)
                     .expect("Yield strategy execution failed");
@@ -2370,7 +1658,7 @@ impl SoroTaskContract {
             } else {
                 false
             };
-
+            
             // ── Cross-contract call ──────────────────────────────────────
             if !executed_yield_strategy {
                 env.invoke_contract::<Val>(&config.target, &config.function, config.args.clone());
@@ -3044,11 +2332,11 @@ impl SoroTaskContract {
         // Get fee model configuration from storage (if available)
         // Default to fixed fee model if not configured
         let mut fee = FIXED_EXECUTION_FEE;
-
+        
         // Check if token is initialized for native token fee payments
         if env.storage().instance().has(&DataKey::Token) {
             // Get tokenomics configuration
-            let tokenomics_config: TokenomicsConfig = env
+            let config: TokenomicsConfig = env
                 .storage()
                 .instance()
                 .get(&DataKey::TokenomicsConfig)
@@ -3060,63 +2348,63 @@ impl SoroTaskContract {
                     min_fee: 50,
                     max_fee: 10000,
                 });
-
+            
             // For native token, use more sophisticated fee calculation
             // Base fee + complexity-based multiplier
             let base_fee = 50; // Base fee in native token units
-
+            
             // Calculate complexity multiplier based on args size
             let args_size = config.args.len() as i128 * 10; // 10 units per argument
-
+            
             // Add complexity bonus for target contract interaction
             let target_complexity_bonus = 20; // Fixed bonus for cross-contract calls
-
-            let calculated_fee = base_fee + args_size + target_complexity_bonus;
-
+            
+            fee = base_fee + args_size + target_complexity_bonus;
+            
             // Apply fee model specific logic
-            match tokenomics_config.fee_model {
+            match config.fee_model {
                 FeeModel::Fixed => {
-                    fee = tokenomics_config.min_fee;
-                }
+                    fee = config.min_fee;
+                },
                 FeeModel::Percentage => {
                     // Calculate percentage-based fee
-                    let percentage = 10; // 10% fee
-                    fee = calculated_fee * percentage / 100;
-                }
+                    let percentage = 10; // 1% fee
+                    fee = (base_fee + args_size + target_complexity_bonus) * percentage / 100;
+                },
                 FeeModel::Dynamic => {
                     // Dynamic fee based on network conditions
                     // Base fee + complexity multiplier + network congestion factor + keeper availability factor
-
+                    
                     // Get network metrics
-                    let network_metrics = Self::get_network_metrics(env);
-
+                    let mut network_metrics = Self::get_network_metrics(env);
+                    
                     // Get keeper metrics
-                    let keeper_metrics = Self::get_keeper_metrics(env);
-
+                    let mut keeper_metrics = Self::get_keeper_metrics(env);
+                    
                     // Calculate network congestion factor (0-200%) based on recent activity
                     // Higher congestion = higher fees
                     let congestion_factor = Self::calculate_congestion_factor(&network_metrics);
-
+                    
                     // Calculate keeper availability factor (0-200%) based on active keepers
                     // Lower availability = higher fees
-                    let keeper_availability_factor =
-                        Self::calculate_keeper_availability_factor(&keeper_metrics);
-
+                    let keeper_availability_factor = Self::calculate_keeper_availability_factor(&keeper_metrics);
+                    
                     // Apply factors to base fee
-                    fee =
-                        calculated_fee * congestion_factor / 100 * keeper_availability_factor / 100;
-                }
+                    fee = (base_fee + args_size + target_complexity_bonus) 
+                        * congestion_factor / 100 
+                        * keeper_availability_factor / 100;
+                },
             }
-
+            
             // Apply minimum and maximum fee thresholds
-            if fee < tokenomics_config.min_fee {
-                fee = tokenomics_config.min_fee;
+            if fee < config.min_fee {
+                fee = config.min_fee;
             }
-            if fee > tokenomics_config.max_fee {
-                fee = tokenomics_config.max_fee;
+            if fee > config.max_fee {
+                fee = config.max_fee;
             }
         }
-
+        
         fee
     }
 
@@ -3126,11 +2414,9 @@ impl SoroTaskContract {
         if env.storage().instance().has(&DataKey::TokenomicsConfig) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::TokenomicsConfig, &config);
-
+        
+        env.storage().instance().set(&DataKey::TokenomicsConfig, &config);
+        
         // Emit TokenomicsConfigInitialized event
         env.events().publish(
             (
@@ -3145,24 +2431,19 @@ impl SoroTaskContract {
     /// Updates the tokenomics configuration.
     pub fn update_tokenomics_config(env: Env, config: TokenomicsConfig) {
         enter_security_guard(&env);
-        let caller = env.invoker();
+        let caller = Address::current(&env);
         
-
-        require_admin(&env);
-        // Existing admin check remains for backward compatibility
-
+        // Only admin or governance execution can update tokenomics config
         // In production, this would be a multisig or governance-controlled address
-        let is_admin = caller == env.current_contract_address();
+        let is_admin = caller == Address::generate(&env);
         let is_governance_execution = Self::is_governance_execution(&env);
-
+        
         if !is_admin && !is_governance_execution {
             panic_with_error!(&env, Error::Unauthorized);
         }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::TokenomicsConfig, &config);
-
+        
+        env.storage().instance().set(&DataKey::TokenomicsConfig, &config);
+        
         // Emit TokenomicsConfigUpdated event
         env.events().publish(
             (
@@ -3184,13 +2465,10 @@ impl SoroTaskContract {
             .instance()
             .get(&DataKey::AdminAddress);
         
-
-        require_admin(&env);
-        // Existing admin check remains for backward compatibility
-
+        // Only admin can set VRF oracle address
         match admin_address {
             Some(admin) => {
-                let caller = env.invoker();
+                let caller = Address::current(&env);
                 if caller != admin {
                     panic_with_error!(&env, Error::Unauthorized);
                 }
@@ -3201,11 +2479,9 @@ impl SoroTaskContract {
                 panic_with_error!(&env, Error::NotInitialized);
             }
         }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::VrfOracleAddress, &oracle_address);
-
+        
+        env.storage().instance().set(&DataKey::VrfOracleAddress, &oracle_address);
+        
         // Emit VrfOracleAddressSet event
         env.events().publish(
             (
@@ -3219,7 +2495,7 @@ impl SoroTaskContract {
 
     /// Submits a Zero-Knowledge proof for task condition verification.
     /// Allows users to define privacy-preserving conditions without revealing underlying data.
-    ///
+    /// 
     /// # Parameters
     /// - `env`: The Soroban environment
     /// - `task_id`: The ID of the task this ZK condition applies to
@@ -3229,12 +2505,12 @@ impl SoroTaskContract {
     pub fn submit_zk_condition(
         env: Env,
         task_id: u64,
-        condition_hash: Bytes,
-        zk_proof: Bytes,
+        condition_hash: Vec<u8>,
+        zk_proof: Vec<u8>,
         verifier_address: Address,
     ) {
         enter_security_guard(&env);
-
+        
         // Validate task exists
         let task_key = DataKey::Task(task_id);
         let config: TaskConfig = env
@@ -3243,19 +2519,19 @@ impl SoroTaskContract {
             .get(&task_key)
             .ok_or(Error::TaskNotFound)
             .expect("Task not found");
-
+        
         // Only task creator can submit ZK conditions
         config.creator.require_auth();
-
+        
         // Validate proof size
         if zk_proof.len() == 0 {
             panic_with_error!(&env, Error::InvalidVrfRequest);
         }
-
+        
         if zk_proof.len() > 4096 {
             panic_with_error!(&env, Error::ArgsTooLarge);
         }
-
+        
         // Generate unique sequential ID
         let mut counter: u64 = env
             .storage()
@@ -3263,10 +2539,8 @@ impl SoroTaskContract {
             .get(&DataKey::ZkConditionCounter)
             .unwrap_or(0);
         counter += 1;
-        env.storage()
-            .persistent()
-            .set(&DataKey::ZkConditionCounter, &counter);
-
+        env.storage().persistent().set(&DataKey::ZkConditionCounter, &counter);
+        
         // Create ZK condition
         let zk_condition = ZkCondition {
             task_id,
@@ -3276,12 +2550,12 @@ impl SoroTaskContract {
             created_at: env.ledger().timestamp(),
             is_verified: false,
         };
-
+        
         // Store ZK condition
         env.storage()
             .persistent()
             .set(&DataKey::ZkConditions(counter), &zk_condition);
-
+        
         // Emit ZkConditionSubmitted event
         env.events().publish(
             (
@@ -3291,41 +2565,41 @@ impl SoroTaskContract {
             ),
             (task_id, config.creator.clone()),
         );
-
+        
         exit_security_guard(&env);
     }
 
     /// Verifies a Zero-Knowledge proof for a task condition.
     /// Called by the ZK verifier contract to confirm the proof is valid.
-    ///
+    /// 
     /// # Parameters
     /// - `env`: The Soroban environment
     /// - `condition_id`: The ID of the ZK condition to verify
     /// - `is_valid`: Whether the ZK proof is valid
     pub fn verify_zk_condition(env: Env, condition_id: u64, is_valid: bool) {
         enter_security_guard(&env);
-
+        
         // Get the ZK condition
         let mut zk_condition: ZkCondition = env
             .storage()
             .persistent()
             .get::<DataKey, ZkCondition>(&DataKey::ZkConditions(condition_id))
             .expect("ZK condition not found");
-
+        
         // Only the verifier contract can call this function
-        let caller = env.invoker();
+        let caller = Address::current(&env);
         if caller != zk_condition.verifier_address {
             panic_with_error!(&env, Error::Unauthorized);
         }
-
+        
         // Update verification status
         zk_condition.is_verified = is_valid;
-
+        
         // Store updated ZK condition
         env.storage()
             .persistent()
             .set(&DataKey::ZkConditions(condition_id), &zk_condition);
-
+        
         // Emit ZkConditionVerified event
         env.events().publish(
             (
@@ -3335,215 +2609,43 @@ impl SoroTaskContract {
             ),
             (zk_condition.task_id, is_valid),
         );
-
+        
         exit_security_guard(&env);
     }
 
     /// Checks if a task's ZK condition is satisfied for execution.
     /// This is called during task execution to determine if the task should run.
-    ///
+    /// 
     /// # Parameters
     /// - `env`: The Soroban environment
     /// - `task_id`: The ID of the task to check
-    ///
+    /// 
     /// # Returns
     /// - `true` if the ZK condition is satisfied and verified
     /// - `false` otherwise
     pub fn is_zk_condition_satisfied(env: Env, task_id: u64) -> bool {
         // Look for ZK conditions for this task
         if env.storage().persistent().has(&DataKey::ZkConditionCounter) {
-            let condition_counter: u64 = env
-                .storage()
-                .persistent()
-                .get(&DataKey::ZkConditionCounter)
-                .unwrap();
-
+            let condition_counter: u64 = env.storage().persistent().get(&DataKey::ZkConditionCounter).unwrap();
+            
             for i in 1..=condition_counter {
-                if let Some(zk_condition) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, ZkCondition>(&DataKey::ZkConditions(i))
-                {
+                if let Ok(zk_condition) = env.storage().persistent().get::<DataKey, ZkCondition>(&DataKey::ZkConditions(i)) {
                     if zk_condition.task_id == task_id && zk_condition.is_verified {
                         return true;
                     }
                 }
             }
         }
-
-        false
-    }
-
-    /// Submits a Merkle proof for task condition verification.
-    /// Allows users to provide Merkle proofs linking off-chain data securely to on-chain execution.
-    ///
-    /// # Parameters
-    /// - `env`: The Soroban environment
-    /// - `task_id`: The ID of the task this Merkle proof applies to
-    /// - `root_hash`: Root hash of the Merkle tree
-    /// - `proof`: Merkle proof data (sibling hashes)
-    /// - `leaf_index`: Leaf index in the Merkle tree
-    /// - `verifier_address`: Address of the Merkle verifier contract
-    pub fn submit_merkle_proof(
-        env: Env,
-        task_id: u64,
-        root_hash: Bytes,
-        proof: Vec<Bytes>,
-        leaf_index: u64,
-        verifier_address: Address,
-    ) {
-        enter_security_guard(&env);
-
-        // Validate task exists
-        let task_key = DataKey::Task(task_id);
-        let config: TaskConfig = env
-            .storage()
-            .persistent()
-            .get(&task_key)
-            .ok_or(Error::TaskNotFound)
-            .expect("Task not found");
-
-        // Only task creator can submit Merkle proofs
-        config.creator.require_auth();
-
-        // Validate proof size
-        if proof.len() == 0 {
-            panic_with_error!(&env, Error::InvalidVrfRequest);
-        }
-
-        if proof.len() > 32 {
-            panic_with_error!(&env, Error::ArgsTooLarge);
-        }
-
-        // Generate unique sequential ID
-        let mut counter: u64 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::MerkleProofCounter)
-            .unwrap_or(0);
-        counter += 1;
-        env.storage()
-            .persistent()
-            .set(&DataKey::MerkleProofCounter, &counter);
-
-        // Create Merkle proof
-        let merkle_proof = MerkleProof {
-            task_id,
-            root_hash,
-            proof,
-            leaf_index,
-            verifier_address,
-            created_at: env.ledger().timestamp(),
-            is_verified: false,
-        };
-
-        // Store Merkle proof
-        env.storage()
-            .persistent()
-            .set(&DataKey::MerkleProofs(counter), &merkle_proof);
-
-        // Emit MerkleProofSubmitted event
-        env.events().publish(
-            (
-                Symbol::new(&env, "MerkleProofSubmitted"),
-                Symbol::new(&env, "v1"),
-                counter,
-            ),
-            (task_id, config.creator.clone()),
-        );
-
-        exit_security_guard(&env);
-    }
-
-    /// Verifies a Merkle proof for a task condition.
-    /// Called by the Merkle verifier contract to confirm the proof is valid.
-    ///
-    /// # Parameters
-    /// - `env`: The Soroban environment
-    /// - `proof_id`: The ID of the Merkle proof to verify
-    /// - `is_valid`: Whether the Merkle proof is valid
-    pub fn verify_merkle_proof(env: Env, proof_id: u64, is_valid: bool) {
-        enter_security_guard(&env);
-
-        // Get the Merkle proof
-        let mut merkle_proof: MerkleProof = env
-            .storage()
-            .persistent()
-            .get::<DataKey, MerkleProof>(&DataKey::MerkleProofs(proof_id))
-            .expect("Merkle proof not found");
-
-        // Only the verifier contract can call this function
-        let caller = env.invoker();
-        if caller != merkle_proof.verifier_address {
-            panic_with_error!(&env, Error::Unauthorized);
-        }
-
-        // Update verification status
-        merkle_proof.is_verified = is_valid;
-
-        // Store updated Merkle proof
-        env.storage()
-            .persistent()
-            .set(&DataKey::MerkleProofs(proof_id), &merkle_proof);
-
-        // Emit MerkleProofVerified event
-        env.events().publish(
-            (
-                Symbol::new(&env, "MerkleProofVerified"),
-                Symbol::new(&env, "v1"),
-                proof_id,
-            ),
-            (merkle_proof.task_id, is_valid),
-        );
-
-        exit_security_guard(&env);
-    }
-
-    /// Checks if a task's Merkle proof is satisfied for execution.
-    /// This is called during task execution to determine if the task should run.
-    ///
-    /// # Parameters
-    /// - `env`: The Soroban environment
-    /// - `task_id`: The ID of the task to check
-    ///
-    /// # Returns
-    /// - `true` if the Merkle proof is satisfied and verified
-    /// - `false` otherwise
-    pub fn is_merkle_proof_satisfied(env: Env, task_id: u64) -> bool {
-        // Look for Merkle proofs for this task
-        if env.storage().persistent().has(&DataKey::MerkleProofCounter) {
-            let proof_counter: u64 = env
-                .storage()
-                .persistent()
-                .get(&DataKey::MerkleProofCounter)
-                .unwrap();
-
-            for i in 1..=proof_counter {
-                if let Some(merkle_proof) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, MerkleProof>(&DataKey::MerkleProofs(i))
-                {
-                    if merkle_proof.task_id == task_id && merkle_proof.is_verified {
-                        return true;
-                    }
-                }
-            }
-        }
-
+        
         false
     }
 
     /// Sets the admin contract address.
-    /// Only callable by an address with the Admin role.
     /// Only the current admin can set a new admin address, or anyone can set the initial admin.
     pub fn set_admin_address(env: Env, admin_address: Address) {
         enter_security_guard(&env);
         
-
-        require_admin(&env);
-        // Existing admin check remains for backward compatibility
-
+        // Check if admin address is already set
         let current_admin: Option<Address> = env
             .storage()
             .instance()
@@ -3551,17 +2653,15 @@ impl SoroTaskContract {
         
         if let Some(existing_admin) = current_admin {
             // If admin is already set, only the current admin can change it
-            let caller = env.current_contract_address();
+            let caller = Address::current(&env);
             if caller != existing_admin {
                 panic_with_error!(&env, Error::Unauthorized);
             }
         }
-
+        
         // Store the new admin address
-        env.storage()
-            .instance()
-            .set(&DataKey::AdminAddress, &admin_address);
-
+        env.storage().instance().set(&DataKey::AdminAddress, &admin_address);
+        
         // Emit AdminAddressSet event
         env.events().publish(
             (
@@ -3606,15 +2706,9 @@ impl SoroTaskContract {
     fn calculate_congestion_factor(metrics: &NetworkMetrics) -> i128 {
         // Simple linear scaling: 50% congestion = 100%, 100% congestion = 200%
         let base_factor = 100 + (metrics.current_congestion_level * 100 / 100);
-
+        
         // Clamp between 50% and 300%
-        if base_factor < 50 {
-            50
-        } else if base_factor > 300 {
-            300
-        } else {
-            base_factor as i128
-        }
+        if base_factor < 50 { 50 } else if base_factor > 300 { 300 } else { base_factor }
     }
 
     /// Calculates keeper availability factor based on keeper metrics.
@@ -3623,15 +2717,9 @@ impl SoroTaskContract {
         // Inverse relationship: more keepers = lower factor, fewer keepers = higher factor
         // Base: 100 keepers = 100%, 10 keepers = 200%, 1 keeper = 300%
         let base_factor = 100 + ((100 - metrics.active_keepers_count.min(100)) * 100 / 100);
-
+        
         // Clamp between 50% and 300%
-        if base_factor < 50 {
-            50
-        } else if base_factor > 300 {
-            300
-        } else {
-            base_factor as i128
-        }
+        if base_factor < 50 { 50 } else if base_factor > 300 { 300 } else { base_factor }
     }
 
     /// Initializes a yield harvesting strategy.
@@ -3647,14 +2735,14 @@ impl SoroTaskContract {
         max_gas_fee: i128,
     ) {
         enter_security_guard(&env);
-        let admin = env.current_contract_address();
-
+        let admin = Address::current(&env);
+        
         // Only admin can initialize yield strategies
         // In production, this would be a multisig or governance-controlled address
-        if admin != env.current_contract_address() {
+        if admin != Address::generate(&env) {
             panic_with_error!(&env, Error::Unauthorized);
         }
-
+        
         // Generate a unique sequential ID
         let mut counter: u64 = env
             .storage()
@@ -3662,14 +2750,12 @@ impl SoroTaskContract {
             .get(&DataKey::YieldStrategyCounter)
             .unwrap_or(0);
         counter += 1;
-        env.storage()
-            .instance()
-            .set(&DataKey::YieldStrategyCounter, &counter);
-
+        env.storage().instance().set(&DataKey::YieldStrategyCounter, &counter);
+        
         // Create yield strategy config
         let strategy_config = YieldStrategyConfig {
-            protocol_address: protocol_address.clone(),
-            harvest_function: harvest_function.clone(),
+            protocol_address,
+            harvest_function,
             compound_function,
             harvest_args,
             compound_args,
@@ -3678,12 +2764,10 @@ impl SoroTaskContract {
             created_at: env.ledger().timestamp(),
             is_active: true,
         };
-
+        
         // Store yield strategy
-        env.storage()
-            .persistent()
-            .set(&DataKey::YieldStrategies(counter), &strategy_config);
-
+        env.storage().persistent().set(&DataKey::YieldStrategies(counter), &strategy_config);
+        
         // Emit YieldStrategyInitialized event
         env.events().publish(
             (
@@ -3693,30 +2777,34 @@ impl SoroTaskContract {
             ),
             (protocol_address, harvest_function),
         );
-
+        
         exit_security_guard(&env);
     }
 
     /// Executes a yield harvesting strategy.
     /// Called by tasks configured to use yield harvesting.
-    pub fn execute_yield_strategy(env: Env, strategy_id: u64, task_id: u64) -> Result<(), Error> {
+    pub fn execute_yield_strategy(
+        env: Env,
+        strategy_id: u64,
+        task_id: u64,
+    ) -> Result<(), Error> {
         enter_security_guard(&env);
-
+        
         // Get the yield strategy
         let strategy: YieldStrategyConfig = env
             .storage()
             .persistent()
             .get(&DataKey::YieldStrategies(strategy_id))
             .expect("Yield strategy not found");
-
+        
         if !strategy.is_active {
             panic_with_error!(&env, Error::YieldStrategyNotInitialized);
         }
-
+        
         // Check if we need to harvest (simplified logic)
         // In production, this would check actual yield balance from protocol
         let should_harvest = true; // Placeholder - would be real logic in production
-
+        
         if should_harvest {
             // Execute harvest function
             env.invoke_contract::<Val>(
@@ -3724,14 +2812,14 @@ impl SoroTaskContract {
                 &strategy.harvest_function,
                 strategy.harvest_args.clone(),
             );
-
+            
             // Execute compound function
             env.invoke_contract::<Val>(
                 &strategy.protocol_address,
                 &strategy.compound_function,
                 strategy.compound_args.clone(),
             );
-
+            
             // Emit YieldHarvested event
             env.events().publish(
                 (
@@ -3742,7 +2830,7 @@ impl SoroTaskContract {
                 (task_id, strategy_id),
             );
         }
-
+        
         exit_security_guard(&env);
         Ok(())
     }
@@ -3760,6 +2848,258 @@ impl SoroTaskContract {
                 min_fee: 50,
                 max_fee: 10000,
             })
+    }
+
+    /// Creates a new portfolio.
+    /// Returns the unique sequential ID of the created portfolio.
+    pub fn create_portfolio(env: Env, name: Vec<u8>, description: Vec<u8>) -> u64 {
+        enter_security_guard(&env);
+        let creator = Address::current(&env);
+
+        // Generate a unique sequential ID
+        let mut counter: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PortfolioCounter)
+            .unwrap_or(0);
+        counter += 1;
+        env.storage().persistent().set(&DataKey::PortfolioCounter, &counter);
+
+        let portfolio = Portfolio {
+            creator: creator.clone(),
+            name,
+            description,
+            created_at: env.ledger().timestamp(),
+            is_active: true,
+            task_count: 0,
+        };
+
+        // Store the portfolio configuration
+        env.storage()
+            .persistent()
+            .set(&DataKey::Portfolio(counter), &portfolio);
+
+        // Emit PortfolioCreated event
+        env.events().publish(
+            (
+                Symbol::new(&env, "PortfolioCreated"),
+                Symbol::new(&env, "v1"),
+                counter,
+            ),
+            creator.clone(),
+        );
+
+        exit_security_guard(&env);
+        counter
+    }
+
+    /// Adds a task to a portfolio.
+    pub fn add_task_to_portfolio(env: Env, portfolio_id: u64, task_id: u64) {
+        enter_security_guard(&env);
+        let portfolio_key = DataKey::Portfolio(portfolio_id);
+        let mut portfolio: Portfolio = env
+            .storage()
+            .persistent()
+            .get(&portfolio_key)
+            .expect("Portfolio not found");
+
+        portfolio.creator.require_auth();
+
+        // Validate task exists
+        let task_key = DataKey::Task(task_id);
+        let _task: TaskConfig = env
+            .storage()
+            .persistent()
+            .get(&task_key)
+            .expect("Task not found");
+
+        // Get current portfolio tasks
+        let mut portfolio_tasks = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<u64>>(&DataKey::PortfolioTasks(portfolio_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Check if task is already in portfolio
+        let mut already_exists = false;
+        for i in 0..portfolio_tasks.len() {
+            if portfolio_tasks.get(i).unwrap() == task_id {
+                already_exists = true;
+                break;
+            }
+        }
+
+        if !already_exists {
+            portfolio_tasks.push_back(task_id);
+            portfolio.task_count += 1;
+            env.storage().persistent().set(&DataKey::PortfolioTasks(portfolio_id), &portfolio_tasks);
+            env.storage().persistent().set(&portfolio_key, &portfolio);
+        }
+
+        // Emit PortfolioTaskAdded event
+        env.events().publish(
+            (
+                Symbol::new(&env, "PortfolioTaskAdded"),
+                Symbol::new(&env, "v1"),
+                portfolio_id,
+            ),
+            (task_id, portfolio.creator.clone()),
+        );
+        exit_security_guard(&env);
+    }
+
+    /// Removes a task from a portfolio.
+    pub fn remove_task_from_portfolio(env: Env, portfolio_id: u64, task_id: u64) {
+        enter_security_guard(&env);
+        let portfolio_key = DataKey::Portfolio(portfolio_id);
+        let mut portfolio: Portfolio = env
+            .storage()
+            .persistent()
+            .get(&portfolio_key)
+            .expect("Portfolio not found");
+
+        portfolio.creator.require_auth();
+
+        // Get current portfolio tasks
+        let portfolio_tasks = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<u64>>(&DataKey::PortfolioTasks(portfolio_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Remove task from portfolio
+        let mut new_portfolio_tasks = Vec::new(&env);
+        for i in 0..portfolio_tasks.len() {
+            let task_in_portfolio = portfolio_tasks.get(i).unwrap();
+            if task_in_portfolio != task_id {
+                new_portfolio_tasks.push_back(task_in_portfolio);
+            }
+        }
+
+        if new_portfolio_tasks.len() < portfolio_tasks.len() {
+            portfolio.task_count -= 1;
+            env.storage().persistent().set(&DataKey::PortfolioTasks(portfolio_id), &new_portfolio_tasks);
+            env.storage().persistent().set(&portfolio_key, &portfolio);
+        }
+
+        // Emit PortfolioTaskRemoved event
+        env.events().publish(
+            (
+                Symbol::new(&env, "PortfolioTaskRemoved"),
+                Symbol::new(&env, "v1"),
+                portfolio_id,
+            ),
+            (task_id, portfolio.creator.clone()),
+        );
+        exit_security_guard(&env);
+    }
+
+    /// Gets all tasks in a portfolio.
+    pub fn get_portfolio_tasks(env: Env, portfolio_id: u64) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Vec<u64>>(&DataKey::PortfolioTasks(portfolio_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Gets portfolio information.
+    pub fn get_portfolio(env: Env, portfolio_id: u64) -> Option<Portfolio> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Portfolio(portfolio_id))
+    }
+
+    /// Pauses all tasks in a portfolio.
+    pub fn pause_portfolio(env: Env, portfolio_id: u64) {
+        enter_security_guard(&env);
+        let portfolio_key = DataKey::Portfolio(portfolio_id);
+        let mut portfolio: Portfolio = env
+            .storage()
+            .persistent()
+            .get(&portfolio_key)
+            .expect("Portfolio not found");
+
+        portfolio.creator.require_auth();
+
+        let portfolio_tasks = Self::get_portfolio_tasks(env.clone(), portfolio_id);
+
+        for i in 0..portfolio_tasks.len() {
+            let task_id = portfolio_tasks.get(i).unwrap();
+            Self::pause_task(env.clone(), task_id);
+        }
+
+        // Emit PortfolioPaused event
+        env.events().publish(
+            (
+                Symbol::new(&env, "PortfolioPaused"),
+                Symbol::new(&env, "v1"),
+                portfolio_id,
+            ),
+            portfolio.creator.clone(),
+        );
+        exit_security_guard(&env);
+    }
+
+    /// Resumes all tasks in a portfolio.
+    pub fn resume_portfolio(env: Env, portfolio_id: u64) {
+        enter_security_guard(&env);
+        let portfolio_key = DataKey::Portfolio(portfolio_id);
+        let mut portfolio: Portfolio = env
+            .storage()
+            .persistent()
+            .get(&portfolio_key)
+            .expect("Portfolio not found");
+
+        portfolio.creator.require_auth();
+
+        let portfolio_tasks = Self::get_portfolio_tasks(env.clone(), portfolio_id);
+
+        for i in 0..portfolio_tasks.len() {
+            let task_id = portfolio_tasks.get(i).unwrap();
+            Self::resume_task(env.clone(), task_id);
+        }
+
+        // Emit PortfolioResumed event
+        env.events().publish(
+            (
+                Symbol::new(&env, "PortfolioResumed"),
+                Symbol::new(&env, "v1"),
+                portfolio_id,
+            ),
+            portfolio.creator.clone(),
+        );
+        exit_security_guard(&env);
+    }
+
+    /// Funds all tasks in a portfolio with gas tokens.
+    pub fn fund_portfolio(env: Env, portfolio_id: u64, amount: i128) {
+        enter_security_guard(&env);
+        let portfolio_key = DataKey::Portfolio(portfolio_id);
+        let mut portfolio: Portfolio = env
+            .storage()
+            .persistent()
+            .get(&portfolio_key)
+            .expect("Portfolio not found");
+
+        portfolio.creator.require_auth();
+
+        let portfolio_tasks = Self::get_portfolio_tasks(env.clone(), portfolio_id);
+
+        for i in 0..portfolio_tasks.len() {
+            let task_id = portfolio_tasks.get(i).unwrap();
+            Self::deposit_gas(env.clone(), task_id, portfolio.creator.clone(), amount);
+        }
+
+        // Emit PortfolioFunded event
+        env.events().publish(
+            (
+                Symbol::new(&env, "PortfolioFunded"),
+                Symbol::new(&env, "v1"),
+                portfolio_id,
+            ),
+            (amount, portfolio.creator.clone()),
+        );
+        exit_security_guard(&env);
     }
 
     /// Initializes the staking pool.
@@ -3792,7 +3132,7 @@ impl SoroTaskContract {
     /// Stakes tokens into the staking pool.
     pub fn stake_tokens(env: Env, amount: i128) {
         enter_security_guard(&env);
-        let staker = env.current_contract_address();
+        let staker = Address::current(&env);
 
         // Validate staking pool is initialized
         let pool: StakingPool = env
@@ -3834,10 +3174,7 @@ impl SoroTaskContract {
         // Update staking pool
         let mut updated_pool = pool.clone();
         updated_pool.total_staked += amount;
-        if staking_balance.amount == amount {
-            // This is the first stake for this address
-            updated_pool.stakers_count += 1;
-        }
+        updated_pool.stakers_count += 1;
 
         env.storage()
             .instance()
@@ -3858,7 +3195,7 @@ impl SoroTaskContract {
     /// Unstakes tokens from the staking pool.
     pub fn unstake_tokens(env: Env, amount: i128) {
         enter_security_guard(&env);
-        let staker = env.current_contract_address();
+        let staker = Address::current(&env);
 
         // Validate staking pool is initialized
         let pool: StakingPool = env
@@ -3922,7 +3259,7 @@ impl SoroTaskContract {
     /// Claims accumulated rewards.
     pub fn claim_rewards(env: Env) {
         enter_security_guard(&env);
-        let staker = env.current_contract_address();
+        let staker = Address::current(&env);
 
         // Validate staking pool is initialized
         let pool: StakingPool = env
@@ -3941,8 +3278,7 @@ impl SoroTaskContract {
         // Calculate rewards
         let now = env.ledger().timestamp();
         let time_elapsed = now.saturating_sub(pool.last_reward_timestamp);
-        let reward_amount =
-            (staking_balance.amount * pool.reward_rate * (time_elapsed as i128)) / 1_000_000;
+        let reward_amount = (staking_balance.amount * pool.reward_rate * time_elapsed) / 1_000_000;
 
         if reward_amount > 0 {
             // Get token address
@@ -3985,118 +3321,10 @@ impl SoroTaskContract {
         exit_security_guard(&env);
     }
 
-    fn has_admin_access(env: &Env, caller: &Address) -> bool {
-        if let Some(admin_address) = env.storage().instance().get(&DataKey::AdminAddress) {
-            if caller == &admin_address {
-                return true;
-            }
-        }
-
-        if let Some(permission_grant) = get_permission_grant(env, caller) {
-            for perm in permission_grant.permissions.iter() {
-                if perm == Permission::AdminAccess {
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    fn try_slash_keeper_internal(
-        env: &Env,
-        keeper_address: &Address,
-        amount: i128,
-        reason: Bytes,
-    ) -> Result<(), Error> {
-        if amount <= 0 {
-            return Err(Error::InvalidSlashAmount);
-        }
-
-        let mut staking_balance: StakingBalance = env
-            .storage()
-            .persistent()
-            .get(&DataKey::StakingBalance(keeper_address.clone()))
-            .ok_or(Error::KeeperNotFound)?;
-
-        if staking_balance.amount < amount {
-            return Err(Error::InsufficientStake);
-        }
-
-        // Reduce keeper stake and update pool totals.
-        staking_balance.amount -= amount;
-        env.storage().persistent().set(
-            &DataKey::StakingBalance(keeper_address.clone()),
-            &staking_balance,
-        );
-
-        let mut pool: StakingPool = env
-            .storage()
-            .instance()
-            .get(&DataKey::StakingPool)
-            .expect("Staking pool not initialized");
-
-        pool.total_staked -= amount;
-        if staking_balance.amount == 0 {
-            pool.stakers_count = pool.stakers_count.saturating_sub(1);
-        }
-
-        env.storage().instance().set(&DataKey::StakingPool, &pool);
-
-        // Lower keeper reputation when staking is slashed.
-        if let Some(mut reputation) = get_keeper_reputation(env, keeper_address) {
-            let previous_score = reputation.score;
-            reputation.score = reputation.score.saturating_sub(100);
-            reputation.last_updated = env.ledger().timestamp();
-            set_keeper_reputation(env, keeper_address, &reputation);
-
-            let history = KeeperReputationHistory {
-                address: keeper_address.clone(),
-                score: reputation.score,
-                timestamp: env.ledger().timestamp(),
-                reason: reason.clone(),
-                previous_score,
-            };
-            set_keeper_reputation_history(env, keeper_address, &history);
-        }
-
-        env.events().publish(
-            (
-                Symbol::new(env, "KeeperSlashed"),
-                Symbol::new(env, "v1"),
-                keeper_address.clone(),
-            ),
-            (amount, reason),
-        );
-
-        Ok(())
-    }
-
-    pub fn slash_keeper(env: Env, admin: Address, keeper: Address, amount: i128, reason: Bytes) {
-        enter_security_guard(&env);
-        admin.require_auth();
-        if !Self::has_admin_access(&env, &admin) {
-            panic_with_error!(&env, Error::Unauthorized);
-        }
-
-        if let Err(err) = Self::try_slash_keeper_internal(&env, &keeper, amount, reason) {
-            panic_with_error!(&env, err);
-        }
-
-        exit_security_guard(&env);
-    }
-
     /// Creates a new governance proposal.
-    pub fn create_proposal(
-        env: Env,
-        title: Bytes,
-        description: Bytes,
-        expires_at: u64,
-        proposal_type: ProposalType,
-        payload: Vec<Val>,
-    ) -> u64 {
+    pub fn create_proposal(env: Env, title: Vec<u8>, description: Vec<u8>, expires_at: u64, proposal_type: ProposalType, payload: Vec<Val>) -> u64 {
         enter_security_guard(&env);
-        let proposer = env.current_contract_address();
+        let proposer = Address::current(&env);
 
         // Generate a unique sequential ID
         let mut counter: u64 = env
@@ -4105,9 +3333,7 @@ impl SoroTaskContract {
             .get(&DataKey::GovernanceProposalCounter)
             .unwrap_or(0);
         counter += 1;
-        env.storage()
-            .persistent()
-            .set(&DataKey::GovernanceProposalCounter, &counter);
+        env.storage().persistent().set(&DataKey::GovernanceProposalCounter, &counter);
 
         // Calculate quorum (1% of total staked)
         let pool: StakingPool = env
@@ -4153,7 +3379,7 @@ impl SoroTaskContract {
     /// Votes on a governance proposal.
     pub fn vote_on_proposal(env: Env, proposal_id: u64, vote_for: bool, voting_power: i128) {
         enter_security_guard(&env);
-        let voter = env.current_contract_address();
+        let voter = Address::current(&env);
 
         // Validate proposal exists
         let mut proposal: GovernanceProposal = env
@@ -4191,9 +3417,7 @@ impl SoroTaskContract {
         // Update proposal status if quorum is reached
         if proposal.votes_for >= proposal.quorum && proposal.votes_for > proposal.votes_against {
             proposal.status = ProposalStatus::Passed;
-        } else if proposal.votes_against >= proposal.quorum
-            && proposal.votes_against > proposal.votes_for
-        {
+        } else if proposal.votes_against >= proposal.quorum && proposal.votes_against > proposal.votes_for {
             proposal.status = ProposalStatus::Rejected;
         }
 
@@ -4216,7 +3440,7 @@ impl SoroTaskContract {
     /// Executes a passed governance proposal.
     pub fn execute_proposal(env: Env, proposal_id: u64) {
         enter_security_guard(&env);
-        let executor = env.current_contract_address();
+        let executor = Address::current(&env);
 
         // Validate proposal exists
         let mut proposal: GovernanceProposal = env
@@ -4236,19 +3460,19 @@ impl SoroTaskContract {
                 if proposal.payload.len() < 6 {
                     panic_with_error!(&env, Error::InvalidPayload);
                 }
-
-                let staking_reward_rate = proposal.payload.get(0).unwrap().into_val(&env);
-                let governance_quorum_percentage = proposal.payload.get(1).unwrap().into_val(&env);
-                let governance_voting_period = proposal.payload.get(2).unwrap().into_val(&env);
-                let fee_model = match proposal.payload.get(3).unwrap().into_val(&env) {
+                
+                let staking_reward_rate = proposal.payload.get(0).unwrap().to_i128();
+                let governance_quorum_percentage = proposal.payload.get(1).unwrap().to_i128();
+                let governance_voting_period = proposal.payload.get(2).unwrap().to_u64();
+                let fee_model = match proposal.payload.get(3).unwrap().to_u32() {
                     0 => FeeModel::Fixed,
                     1 => FeeModel::Percentage,
                     2 => FeeModel::Dynamic,
                     _ => FeeModel::Fixed,
                 };
-                let min_fee = proposal.payload.get(4).unwrap().into_val(&env);
-                let max_fee = proposal.payload.get(5).unwrap().into_val(&env);
-
+                let min_fee = proposal.payload.get(4).unwrap().to_i128();
+                let max_fee = proposal.payload.get(5).unwrap().to_i128();
+                
                 let config = TokenomicsConfig {
                     staking_reward_rate,
                     governance_quorum_percentage,
@@ -4257,7 +3481,7 @@ impl SoroTaskContract {
                     min_fee,
                     max_fee,
                 };
-
+                
                 // Update tokenomics config
                 Self::update_tokenomics_config(env.clone(), config);
             }
@@ -4317,11 +3541,10 @@ impl SoroTaskContract {
     /// Helper function to check if current execution is from governance proposal
     /// This checks if the caller is the contract itself (governance execution context)
     fn is_governance_execution(env: &Env) -> bool {
-        let caller = env.current_contract_address();
+        let caller = Address::current(env);
         let contract_address = env.current_contract_address();
         caller == contract_address
     }
-}
 
 // ============================================================================
 // Tests
@@ -6050,15 +5273,13 @@ mod tests {
         let (env, id) = setup();
         let client = SoroTaskContractClient::new(&env, &id);
 
-        let name = Bytes::from_slice(&env, b"My Portfolio");
-        let description = Bytes::from_slice(&env, b"Test portfolio for grouping tasks");
+        let name = vec![&env, b"My Portfolio".to_vec()];
+        let description = vec![&env, b"Test portfolio for grouping tasks".to_vec()];
 
         let portfolio_id = client.create_portfolio(&name, &description);
         assert_eq!(portfolio_id, 1);
 
-        let portfolio = client
-            .get_portfolio(&portfolio_id)
-            .expect("Portfolio should exist");
+        let portfolio = client.get_portfolio(&portfolio_id).expect("Portfolio should exist");
         assert_eq!(portfolio.name, name);
         assert_eq!(portfolio.description, description);
         assert_eq!(portfolio.task_count, 0);
@@ -6071,11 +5292,10 @@ mod tests {
         let (env, id) = setup();
         let client = SoroTaskContractClient::new(&env, &id);
 
-        let name = Bytes::from_slice(&env, b"Test Portfolio");
-        let description = Bytes::from_slice(&env, b"");
-        let portfolio_id = client.create_portfolio(&name, &description);
+        let name = vec![&env, b"Test Portfolio".to_vec()];
+        let portfolio_id = client.create_portfolio(&name, &vec![&env]);
 
-        let target = env.register(MockTarget, ());
+        let target = env.register_contract(None, MockTarget);
         let task1_id = client.register(&base_config(&env, target.clone()));
         let task2_id = client.register(&base_config(&env, target.clone()));
 
@@ -6098,11 +5318,10 @@ mod tests {
         let (env, id) = setup();
         let client = SoroTaskContractClient::new(&env, &id);
 
-        let name = Bytes::from_slice(&env, b"Test Portfolio");
-        let description = Bytes::from_slice(&env, b"");
-        let portfolio_id = client.create_portfolio(&name, &description);
+        let name = vec![&env, b"Test Portfolio".to_vec()];
+        let portfolio_id = client.create_portfolio(&name, &vec![&env]);
 
-        let target = env.register(MockTarget, ());
+        let target = env.register_contract(None, MockTarget);
         let task1_id = client.register(&base_config(&env, target.clone()));
         let task2_id = client.register(&base_config(&env, target.clone()));
 
@@ -6127,11 +5346,10 @@ mod tests {
         let (env, id) = setup();
         let client = SoroTaskContractClient::new(&env, &id);
 
-        let name = Bytes::from_slice(&env, b"Test Portfolio");
-        let description = Bytes::from_slice(&env, b"");
-        let portfolio_id = client.create_portfolio(&name, &description);
+        let name = vec![&env, b"Test Portfolio".to_vec()];
+        let portfolio_id = client.create_portfolio(&name, &vec![&env]);
 
-        let target = env.register(MockTarget, ());
+        let target = env.register_contract(None, MockTarget);
         let task1_id = client.register(&base_config(&env, target.clone()));
         let task2_id = client.register(&base_config(&env, target.clone()));
 
@@ -6173,16 +5391,15 @@ mod tests {
         let token_admin = Address::generate(&env);
         let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_address = token_id.address();
-        let _token_client = soroban_sdk::token::Client::new(&env, &token_address);
+        let token_client = soroban_sdk::token::Client::new(&env, &token_address);
         let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_address);
 
         client.init(&token_address);
 
-        let name = Bytes::from_slice(&env, b"Test Portfolio");
-        let description = Bytes::from_slice(&env, b"");
-        let portfolio_id = client.create_portfolio(&name, &description);
+        let name = vec![&env, b"Test Portfolio".to_vec()];
+        let portfolio_id = client.create_portfolio(&name, &vec![&env]);
 
-        let target = env.register(MockTarget, ());
+        let target = env.register_contract(None, MockTarget);
         let task1_id = client.register(&base_config(&env, target.clone()));
         let task2_id = client.register(&base_config(&env, target.clone()));
 
@@ -6191,7 +5408,6 @@ mod tests {
         client.add_task_to_portfolio(&portfolio_id, &task2_id);
 
         // Fund portfolio with gas tokens
-        token_admin_client.mint(&id, &2000);
         client.fund_portfolio(&portfolio_id, &1000);
 
         // Verify tasks have received gas
@@ -6241,7 +5457,7 @@ mod tests {
         let token_admin = Address::generate(&env);
         let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_address = token_id.address();
-        let _token_client = soroban_sdk::token::Client::new(&env, &token_address);
+        let token_client = soroban_sdk::token::Client::new(&env, &token_address);
         let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_address);
 
         client.init(&token_address);
@@ -6249,14 +5465,15 @@ mod tests {
         // Initialize staking pool
         client.init_staking_pool(&500);
 
-        // stake_tokens stakes from the contract address.
-        token_admin_client.mint(&id, &1000);
+        // Mint tokens to staker
+        let staker = Address::generate(&env);
+        token_admin_client.mint(&staker, &1000);
 
         // Stake tokens
         client.stake_tokens(&100);
 
         // Verify staking balance
-        let staking_balance = client.get_staking_balance(&id).unwrap();
+        let staking_balance = client.get_staking_balance(&staker).unwrap();
         assert_eq!(staking_balance.amount, 100);
 
         // Verify staking pool
@@ -6274,7 +5491,7 @@ mod tests {
         let token_admin = Address::generate(&env);
         let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_address = token_id.address();
-        let _token_client = soroban_sdk::token::Client::new(&env, &token_address);
+        let token_client = soroban_sdk::token::Client::new(&env, &token_address);
         let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_address);
 
         client.init(&token_address);
@@ -6282,18 +5499,17 @@ mod tests {
         // Initialize staking pool
         client.init_staking_pool(&500);
 
-        // stake_tokens stakes from the contract address.
-        token_admin_client.mint(&id, &1000);
+        // Mint tokens to proposer
+        let proposer = Address::generate(&env);
+        token_admin_client.mint(&proposer, &1000);
 
         // Stake tokens
         client.stake_tokens(&100);
 
         // Create proposal
-        let title = Bytes::from_slice(&env, b"Test Proposal");
-        let description = Bytes::from_slice(&env, b"This is a test proposal");
-        let payload = Vec::<Val>::new(&env);
-        let proposal_id =
-            client.create_proposal(&title, &description, &10000, &ProposalType::Other, &payload);
+        let title = vec![&env, b"Test Proposal".to_vec()];
+        let description = vec![&env, b"This is a test proposal".to_vec()];
+        let proposal_id = client.create_proposal(&title, &description, &10000);
 
         // Verify proposal was created
         let proposal = client.get_governance_proposal(&proposal_id).unwrap();
