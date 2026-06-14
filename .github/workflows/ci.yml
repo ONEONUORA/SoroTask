@@ -1,0 +1,105 @@
+name: Unified CI Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  rust-contract-ci:
+    name: Rust Contract CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - name: Cache Cargo Registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./contract -> target"
+      - name: Rust Format Check
+        run: cargo fmt --all -- --check
+        working-directory: ./contract
+      - name: Rust Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        working-directory: ./contract
+      - name: Rust Tests
+        run: cargo test
+        working-directory: ./contract
+      - name: Rust Build WASM
+        run: cargo build --target wasm32-unknown-unknown --release
+        working-directory: ./contract
+
+  node-keeper-ci:
+    name: Node.js CI (Keeper)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20.x
+      - name: Install dependencies
+        working-directory: ./keeper
+        run: npm install --legacy-peer-deps
+      - name: Lint Keeper
+        working-directory: ./keeper
+        run: npm run lint
+      - name: Test Keeper
+        working-directory: ./keeper
+        run: npm test --if-present
+
+  node-frontend-ci:
+    name: Node.js CI (Frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20.x
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm install --legacy-peer-deps
+      - name: Lint Frontend
+        working-directory: ./frontend
+        run: npm run lint --if-present
+      - name: Test Frontend
+        working-directory: ./frontend
+        run: npm test --if-present
+      - name: Build Frontend
+        working-directory: ./frontend
+        run: npm run build --if-present
+
+  security-scan:
+    name: Security & Audit Scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run Secret Scan (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cargo Audit
+        run: cargo install cargo-audit && cargo audit
+        working-directory: ./contract
+
+  docker-build-check:
+    name: Keeper Docker Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build Keeper Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./keeper
+          push: false
+          tags: sorotask-keeper:test
